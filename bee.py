@@ -15,20 +15,26 @@ import time
 
 def display_bee_logo():
     """Display the BeeEgypt ASCII logo with animation."""
-    logo = """
+    # ANSI color codes
+    YELLOW = '\033[93m'
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    
+    logo = f"""
+{YELLOW}{BOLD}
     ╔══════════════════════════════════════════════════════════════╗
     ║                                                              ║
-    ║    ██████╗ ███████╗███████╗███████╗ ██████╗██╗   ██╗██████╗  ║
-    ║    ██╔══██╗██╔════╝██╔════╝██╔════╝██╔════╝╚██╗ ██╔╝██╔══██╗ ║
-    ║    ██████╔╝█████╗  █████╗  █████╗  ██║  ███╗╚████╔╝ ██████╔╝ ║
-    ║    ██╔══██╗██╔══╝  ██╔══╝  ██╔══╝  ██║   ██║ ╚██╔╝  ██╔═══╝  ║
-    ║    ██████╔╝███████╗███████╗███████╗╚██████╔╝  ██║   ██║      ║
-    ║    ╚═════╝ ╚══════╝╚══════╝╚══════╝ ╚═════╝   ╚═╝   ╚═╝      ║
+    ║    ██████╗ ███████╗███████╗    ███████╗ ██████╗██╗   ██╗     ║
+    ║    ██╔══██╗██╔════╝██╔════╝    ██╔════╝██╔════╝╚██╗ ██╔╝     ║
+    ║    ██████╔╝█████╗  █████╗      █████╗  ██║  ███╗╚████╔╝      ║
+    ║    ██╔══██╗██╔══╝  ██╔══╝      ██╔══╝  ██║   ██║ ╚██╔╝       ║
+    ║    ██████╔╝███████╗███████╗    ███████╗╚██████╔╝  ██║        ║
+    ║    ╚═════╝ ╚══════╝╚══════╝    ╚══════╝ ╚═════╝   ╚═╝        ║
     ║                                                              ║
-    ║                    🐝 AI Code Agent 🐝                       ║
-    ║              Buzzing with Intelligence & Creativity          ║
-    ║                                                              ║
+    ║                  Buzzing with Intelligence                   ║
+    ║                     By:@Loaiiabdalslam                       ║
     ╚══════════════════════════════════════════════════════════════╝
+{RESET}
     """
     
     # Clear screen
@@ -40,99 +46,11 @@ def display_bee_logo():
         print(line)
         time.sleep(0.1)
     
-    print("\n" + "="*60)
-    print("🚀 Welcome to BeeEgypt - Your AI-Powered Development Assistant")
-    print("="*60 + "\n")
+    print(f"\n{YELLOW}{BOLD}" + "="*60 + f"{RESET}")
+    print(f"{YELLOW}🚀 Welcome to Bee Egypt - Your AI-Powered Development Assistant{RESET}")
+    print(f"{YELLOW}{BOLD}" + "="*60 + f"{RESET}\n")
 
-def check_python_version():
-    """Check if Python version is compatible."""
-    if sys.version_info < (3, 8):
-        print("❌ Python 3.8 or higher is required")
-        print(f"Current version: {sys.version}")
-        return False
-    print(f"✅ Python version: {sys.version.split()[0]}")
-    return True
 
-def check_dependencies():
-    """Check if required dependencies are installed."""
-    print("\n📦 Checking dependencies...")
-    
-    required_packages = [
-        'google-generativeai',
-        'openai', 
-        'anthropic',
-        'python-dotenv',
-        'gitpython',
-        'click',
-        'rich',
-        'pydantic',
-        'pytest',
-        'markdown',
-        'pyautogui',
-        'pytesseract',
-        'Pillow',
-        'watchdog'
-    ]
-    
-    missing_packages = []
-    
-    for package in required_packages:
-        try:
-            __import__(package.replace('-', '_'))
-            print(f"✅ {package}")
-        except ImportError:
-            print(f"❌ {package} - Missing")
-            missing_packages.append(package)
-    
-    return missing_packages
-
-def install_dependencies(missing_packages: List[str]):
-    """Install missing dependencies."""
-    if not missing_packages:
-        return True
-        
-    print(f"\n📥 Installing {len(missing_packages)} missing packages...")
-    
-    try:
-        subprocess.check_call([
-            sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'
-        ])
-        print("✅ Dependencies installed successfully")
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Failed to install dependencies: {e}")
-        return False
-
-def check_env_file():
-    """Check if .env file exists and has required variables."""
-    print("\n🔧 Checking environment configuration...")
-    
-    env_file = Path('.env')
-    if not env_file.exists():
-        print("❌ .env file not found")
-        print("📝 Creating .env file from .env.example...")
-        
-        example_file = Path('.env.example')
-        if example_file.exists():
-            with open(example_file, 'r') as src, open(env_file, 'w') as dst:
-                dst.write(src.read())
-            print("✅ .env file created from .env.example")
-            print("⚠️  Please edit .env file and add your API keys")
-            return False
-        else:
-            print("❌ .env.example file not found")
-            return False
-    
-    # Check if API key is configured
-    with open(env_file, 'r') as f:
-        content = f.read()
-        
-    if 'your_google_api_key_here' in content or 'your_openai_api_key_here' in content:
-        print("⚠️  Please configure your API keys in .env file")
-        return False
-        
-    print("✅ Environment file configured")
-    return True
 
 def get_project_path():
     """Get project path from user with validation."""
@@ -342,29 +260,9 @@ def main():
     print("🔍 SYSTEM CHECKS")
     print("-" * 20)
     
-    # Check Python version
-    if not check_python_version():
-        input("\nPress Enter to exit...")
-        return 1
+  
     
-    # Check and install dependencies
-    missing_packages = check_dependencies()
-    if missing_packages:
-        print(f"\n⚠️  Found {len(missing_packages)} missing packages")
-        if input("Install missing packages? (Y/n): ").lower() != 'n':
-            if not install_dependencies(missing_packages):
-                input("\nPress Enter to exit...")
-                return 1
-        else:
-            print("❌ Cannot proceed without required packages")
-            input("\nPress Enter to exit...")
-            return 1
-    
-    # Check environment configuration
-    if not check_env_file():
-        print("\n⚠️  Please configure your .env file and run this script again")
-        input("\nPress Enter to exit...")
-        return 1
+ 
     
     print("\n✅ All system checks passed!")
     input("\nPress Enter to continue...")

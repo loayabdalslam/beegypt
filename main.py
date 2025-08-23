@@ -64,6 +64,18 @@ logger = logging.getLogger(__name__)
 # Initialize console for rich output
 console = Console()
 
+# Global variable for auto-yes mode
+auto_yes_mode = False
+
+def auto_confirm(message: str, default: bool = True) -> bool:
+    """
+    Auto-confirmation function that respects auto_yes_mode.
+    """
+    if auto_yes_mode:
+        console.print(f"[dim]{message} [auto-yes][/dim]")
+        return True
+    return Confirm.ask(message, default=default)
+
 class CodeAgent:
     """
     AI-powered code agent that can handle software engineering tasks.
@@ -262,7 +274,7 @@ class CodeAgent:
     def setup_project(self) -> Dict:
         """
         Set up the project structure based on the plan.
-        Only creates directories and essential files, leaving code generation to tasks.
+        Prioritizes package files and .gitignore creation first, then directories.
 
         Returns:
             Dictionary with setup results
@@ -275,8 +287,43 @@ class CodeAgent:
         # Log the setup process
         self.logger.start_section("Project Setup")
 
-        # Initialize Git repository in the project directory
-        console.print("\n[bold yellow]Initializing Git repository in project directory...[/bold yellow]")
+        # STEP 1: Create package files FIRST (NO INSTALLATION YET)
+        console.print("\n[bold yellow]Step 1: Creating package files (no installation)...[/bold yellow]")
+        
+        # Initialize package handler early
+        package_handler = PackageHandler(self.project_dir)
+        
+        # Create package files based on project plan
+        package_structure = {
+            "project_name": self.project_description.get("project_name", "my-project"),
+            "description": self.project_description.get("description", ""),
+            "project_type": self.project_plan.get("project_type", ""),
+            "technologies": self.project_plan.get("technologies", []),
+            "directories": [],
+            "files": []
+        }
+        
+        package_results = package_handler.ensure_package_files(package_structure)
+        
+        # STEP 2: Create .gitignore BEFORE any other files
+        console.print("\n[bold yellow]Step 2: Creating .gitignore before any other files...[/bold yellow]")
+        gitignore_content = self._generate_gitignore(package_structure)
+        gitignore_path = self.project_dir / ".gitignore"
+        if not gitignore_path.exists():
+            with open(gitignore_path, "w", encoding='utf-8') as f:
+                f.write(gitignore_content)
+            package_results["created_files"].append(str(gitignore_path))
+            console.print(f"  - Created .gitignore")
+        
+        if package_results.get("created_files"):
+            console.print("\n[bold green]Created package files:[/bold green]")
+            self.logger.start_subsection("Created Package Files")
+            for file_path in package_results["created_files"]:
+                console.print(f"  - {Path(file_path).name}")
+                self.logger.log_text(f"- {Path(file_path).name}")
+        
+        # STEP 3: Initialize Git repository
+        console.print("\n[bold yellow]Step 3: Initializing Git repository...[/bold yellow]")
         self.git_manager = GitManager(self.project_dir)
         git_init_result = self.git_manager.init_repo()
 
@@ -287,8 +334,11 @@ class CodeAgent:
             console.print(f"[bold yellow]Note:[/bold yellow] {git_init_result['message']}")
             self.logger.log_text(f"⚠️ {git_init_result['message']}")
 
-        # Extract directory structure from the plan
-        console.print("\n[bold yellow]Creating project structure...[/bold yellow]")
+        # STEP 4: Create all project files and directory structure
+        console.print("\n[bold yellow]Step 4: Creating all project files and directory structure...[/bold yellow]")
+        
+        # Check for and remove any duplicate/nested project structures
+        self._clean_duplicate_structures()
 
         # Generate a prompt to extract ONLY the directory structure
         structure_prompt = f"""
@@ -379,6 +429,14 @@ class CodeAgent:
             state_file = self.project_dir / "project_state.json"
             self._save_project_state(state_file)
 
+            # STEP 5: Install dependencies as the FINAL step
+            console.print("\n[bold yellow]Step 5: Installing dependencies (final step)...[/bold yellow]")
+            all_package_files = [f for f in package_results.get("created_files", []) if Path(f).name in ["package.json", "requirements.txt", "Gemfile", "Cargo.toml"]]
+            if all_package_files:
+                self._install_dependencies(all_package_files)
+            else:
+                console.print("  - No package files found to install")
+
             # Save the logger
             self.logger.save()
 
@@ -394,6 +452,239 @@ class CodeAgent:
             logger.error(f"Error setting up project structure: {e}")
             console.print(f"[bold red]Error setting up project structure:[/bold red] {str(e)}")
             return {"success": False, "error": str(e)}
+
+    def _clean_duplicate_structures(self) -> None:
+        """
+        Clean up duplicate/nested project structures and files.
+        """
+        console.print("  - Checking for duplicate/nested structures...")
+        
+        duplicates_found = False
+        
+        # Check for nested projects with same name
+        project_name = self.project_dir.name
+        nested_project_path = self.project_dir / project_name
+        
+        if nested_project_path.exists() and nested_project_path.is_dir():
+            console.print(f"    [yellow]Found nested project directory: {nested_project_path}[/yellow]")
+            # Move contents up one level
+            for item in nested_project_path.iterdir():
+                target = self.project_dir / item.name
+                if not target.exists():
+                    item.rename(target)
+                    console.print(f"    - Moved {item.name} up one level")
+                else:
+                    console.print(f"    [yellow]Skipped {item.name} (already exists)[/yellow]")
+            
+            # Remove empty nested directory
+            try:
+                nested_project_path.rmdir()
+                console.print(f"    - Removed empty nested directory: {project_name}")
+                duplicates_found = True
+            except OSError:
+                console.print(f"    [yellow]Could not remove {project_name} (not empty)[/yellow]")
+        
+        # Check for duplicate package files
+        package_files = ["package.json", "requirements.txt", "Gemfile", "Cargo.toml"]
+        for package_file in package_files:
+            main_file = self.project_dir / package_file
+            if main_file.exists():
+                # Look for duplicates in subdirectories
+                for subdir in self.project_dir.rglob("*/"):
+                    if subdir.is_dir() and subdir != self.project_dir:
+                        duplicate_file = subdir / package_file
+                        if duplicate_file.exists():
+                            console.print(f"    [yellow]Found duplicate {package_file} in {subdir.relative_to(self.project_dir)}[/yellow]")
+                            duplicate_file.unlink()
+                            console.print(f"    - Removed duplicate {package_file}")
+                            duplicates_found = True
+        
+        # Check for duplicate directories with similar names
+        dirs_to_check = list(self.project_dir.iterdir())
+        for i, dir1 in enumerate(dirs_to_check):
+            if not dir1.is_dir():
+                continue
+            for dir2 in dirs_to_check[i+1:]:
+                if not dir2.is_dir():
+                    continue
+                # Check if directories have very similar names (case insensitive)
+                if dir1.name.lower() == dir2.name.lower() and dir1.name != dir2.name:
+                    console.print(f"    [yellow]Found similar directories: {dir1.name} and {dir2.name}[/yellow]")
+                    # Keep the one with more standard naming (lowercase, no spaces)
+                    if dir1.name.islower() and not dir2.name.islower():
+                        console.print(f"    - Removing {dir2.name} (keeping {dir1.name})")
+                        import shutil
+                        shutil.rmtree(dir2)
+                        duplicates_found = True
+                    elif dir2.name.islower() and not dir1.name.islower():
+                        console.print(f"    - Removing {dir1.name} (keeping {dir2.name})")
+                        import shutil
+                        shutil.rmtree(dir1)
+                        duplicates_found = True
+        
+        if not duplicates_found:
+            console.print("    - No duplicates found")
+        else:
+            console.print("    [green]✓ Cleaned up duplicate structures[/green]")
+
+    def _generate_gitignore(self, package_structure: Dict) -> str:
+        """
+        Generate .gitignore content based on project technologies.
+        """
+        technologies = package_structure.get("technologies", [])
+        project_type = package_structure.get("project_type", "")
+        
+        gitignore_content = ["# General"]
+        gitignore_content.extend([
+            ".DS_Store",
+            "Thumbs.db",
+            "*.log",
+            "*.tmp",
+            "*.temp",
+            ".env",
+            ".env.local",
+            ".env.*.local",
+            ""
+        ])
+        
+        # Add Node.js/JavaScript specific ignores
+        if any(tech.lower() in ["javascript", "typescript", "react", "vue", "angular", "node", "npm", "yarn"] for tech in technologies) or "javascript" in project_type.lower():
+            gitignore_content.extend([
+                "# Node.js",
+                "node_modules/",
+                "npm-debug.log*",
+                "yarn-debug.log*",
+                "yarn-error.log*",
+                ".npm",
+                ".yarn-integrity",
+                "dist/",
+                "build/",
+                ".next/",
+                ".nuxt/",
+                ".vuepress/dist",
+                ""
+            ])
+        
+        # Add Python specific ignores
+        if any(tech.lower() in ["python", "django", "flask", "fastapi"] for tech in technologies) or "python" in project_type.lower():
+            gitignore_content.extend([
+                "# Python",
+                "__pycache__/",
+                "*.py[cod]",
+                "*$py.class",
+                "*.so",
+                ".Python",
+                "build/",
+                "develop-eggs/",
+                "dist/",
+                "downloads/",
+                "eggs/",
+                ".eggs/",
+                "lib/",
+                "lib64/",
+                "parts/",
+                "sdist/",
+                "var/",
+                "wheels/",
+                "*.egg-info/",
+                ".installed.cfg",
+                "*.egg",
+                "venv/",
+                "env/",
+                ".venv/",
+                ".env/",
+                ""
+            ])
+        
+        # Add IDE specific ignores
+        gitignore_content.extend([
+            "# IDEs",
+            ".vscode/",
+            ".idea/",
+            "*.swp",
+            "*.swo",
+            "*~",
+            ""
+        ])
+        
+        return "\n".join(gitignore_content)
+    
+    def _install_dependencies(self, created_files: list) -> None:
+        """
+        Install dependencies based on created package files.
+        """
+        import subprocess
+        
+        for file_path in created_files:
+            file_name = Path(file_path).name
+            
+            if file_name == "package.json":
+                console.print("  - Installing npm dependencies...")
+                try:
+                    result = subprocess.run(
+                        ["npm", "install"],
+                        cwd=self.project_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=300
+                    )
+                    if result.returncode == 0:
+                        console.print("    [bold green]✓ npm install completed[/bold green]")
+                    else:
+                        console.print(f"    [bold yellow]⚠ npm install warning: {result.stderr}[/bold yellow]")
+                except Exception as e:
+                    console.print(f"    [bold red]✗ npm install failed: {e}[/bold red]")
+            
+            elif file_name == "requirements.txt":
+                console.print("  - Installing pip dependencies...")
+                try:
+                    result = subprocess.run(
+                        ["pip", "install", "-r", "requirements.txt"],
+                        cwd=self.project_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=300
+                    )
+                    if result.returncode == 0:
+                        console.print("    [bold green]✓ pip install completed[/bold green]")
+                    else:
+                        console.print(f"    [bold yellow]⚠ pip install warning: {result.stderr}[/bold yellow]")
+                except Exception as e:
+                    console.print(f"    [bold red]✗ pip install failed: {e}[/bold red]")
+            
+            elif file_name == "Gemfile":
+                console.print("  - Installing bundle dependencies...")
+                try:
+                    result = subprocess.run(
+                        ["bundle", "install"],
+                        cwd=self.project_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=300
+                    )
+                    if result.returncode == 0:
+                        console.print("    [bold green]✓ bundle install completed[/bold green]")
+                    else:
+                        console.print(f"    [bold yellow]⚠ bundle install warning: {result.stderr}[/bold yellow]")
+                except Exception as e:
+                    console.print(f"    [bold red]✗ bundle install failed: {e}[/bold red]")
+            
+            elif file_name == "Cargo.toml":
+                console.print("  - Installing cargo dependencies...")
+                try:
+                    result = subprocess.run(
+                        ["cargo", "build"],
+                        cwd=self.project_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=300
+                    )
+                    if result.returncode == 0:
+                        console.print("    [bold green]✓ cargo build completed[/bold green]")
+                    else:
+                        console.print(f"    [bold yellow]⚠ cargo build warning: {result.stderr}[/bold yellow]")
+                except Exception as e:
+                    console.print(f"    [bold red]✗ cargo build failed: {e}[/bold red]")
 
     def _optimize_created_files(self, created_files: List[str]) -> None:
         """
@@ -1103,7 +1394,7 @@ def create_new_project_step_by_step(path: Path, prompt: str, options: Dict) -> b
 
     # Step 1: Process project description
     console.print("\n[bold yellow]Step 1: Processing project description...[/bold yellow]")
-    if not Confirm.ask("Continue with processing project description?"):
+    if not auto_confirm("Continue with processing project description?"):
         console.print("[bold yellow]Operation cancelled by user.[/bold yellow]")
         return False
 
@@ -1114,7 +1405,7 @@ def create_new_project_step_by_step(path: Path, prompt: str, options: Dict) -> b
 
     # Step 2: Set up project structure
     console.print("\n[bold yellow]Step 2: Setting up project structure...[/bold yellow]")
-    if not Confirm.ask("Continue with setting up project structure?"):
+    if not auto_confirm("Continue with setting up project structure?"):
         console.print("[bold yellow]Operation cancelled by user.[/bold yellow]")
         return False
 
@@ -1129,20 +1420,20 @@ def create_new_project_step_by_step(path: Path, prompt: str, options: Dict) -> b
         task_name = task.get('task name', task.get('name', f'Task {i+1}'))
         console.print(f"\n[bold yellow]Step 3.{i+1}: Executing task: {task_name}[/bold yellow]")
 
-        if not Confirm.ask(f"Continue with executing task: {task_name}?"):
+        if not auto_confirm(f"Continue with executing task: {task_name}?"):
             console.print("[bold yellow]Skipping this task.[/bold yellow]")
             continue
 
         task_result = agent.execute_task(i)
         if not task_result["success"]:
             console.print(f"[bold red]Error executing task {i+1}:[/bold red] {task_result.get('error', 'Unknown error')}")
-            if not Confirm.ask("Continue with the next task?"):
+            if not auto_confirm("Continue with the next task?"):
                 console.print("[bold yellow]Operation cancelled by user.[/bold yellow]")
                 return False
 
     # Step 4: Review code
     console.print("\n[bold yellow]Step 4: Reviewing code...[/bold yellow]")
-    if not Confirm.ask("Continue with code review?"):
+    if not auto_confirm("Continue with code review?"):
         console.print("[bold yellow]Skipping code review.[/bold yellow]")
     else:
         review_result = agent.review_code(auto_fix=False)
@@ -1151,7 +1442,7 @@ def create_new_project_step_by_step(path: Path, prompt: str, options: Dict) -> b
 
     # Step 5: Fix code issues
     console.print("\n[bold yellow]Step 5: Fixing code issues...[/bold yellow]")
-    if not Confirm.ask("Continue with fixing code issues?"):
+    if not auto_confirm("Continue with fixing code issues?"):
         console.print("[bold yellow]Skipping code fixes.[/bold yellow]")
     else:
         fix_result = agent.review_code(auto_fix=True)
@@ -1161,7 +1452,7 @@ def create_new_project_step_by_step(path: Path, prompt: str, options: Dict) -> b
     # Step 6: Open in editor
     if not no_editor:
         console.print("\n[bold yellow]Step 6: Opening in code editor...[/bold yellow]")
-        if not Confirm.ask("Open project in code editor?"):
+        if not auto_confirm("Open project in code editor?"):
             console.print("[bold yellow]Skipping opening in editor.[/bold yellow]")
         else:
             agent.open_in_editor()
@@ -1169,7 +1460,7 @@ def create_new_project_step_by_step(path: Path, prompt: str, options: Dict) -> b
     # Step 7: Deploy locally
     if not no_deploy:
         console.print("\n[bold yellow]Step 7: Deploying locally...[/bold yellow]")
-        if not Confirm.ask("Deploy project locally?"):
+        if not auto_confirm("Deploy project locally?"):
             console.print("[bold yellow]Skipping local deployment.[/bold yellow]")
         else:
             agent.deploy_locally()
@@ -1201,19 +1492,19 @@ def edit_existing_project_step_by_step(path: Path, prompt: str, options: Dict) -
 
     # Step 1: Analyze project
     console.print("\n[bold yellow]Step 1: Analyzing project...[/bold yellow]")
-    if not Confirm.ask("Continue with analyzing project?"):
+    if not auto_confirm("Continue with analyzing project?"):
         console.print("[bold yellow]Operation cancelled by user.[/bold yellow]")
         return False
 
     # Step 2: Generate fixes
     console.print("\n[bold yellow]Step 2: Generating fixes...[/bold yellow]")
-    if not Confirm.ask("Continue with generating fixes?"):
+    if not auto_confirm("Continue with generating fixes?"):
         console.print("[bold yellow]Operation cancelled by user.[/bold yellow]")
         return False
 
     # Step 3: Apply fixes
     console.print("\n[bold yellow]Step 3: Applying fixes...[/bold yellow]")
-    if not Confirm.ask("Continue with applying fixes?"):
+    if not auto_confirm("Continue with applying fixes?"):
         console.print("[bold yellow]Operation cancelled by user.[/bold yellow]")
         return False
 
@@ -1295,20 +1586,24 @@ def display_bee_animation():
 
     # Display a final bee with pyramids
     final_art = r"""         
-▗▄▄▖ ▗▄▄▄▖▗▄▄▄▖     ▗▄▄▄▖ ▗▄▄▖▗▖  ▗▖▗▄▄▖ ▗▄▄▄▖
-▐▌ ▐▌▐▌   ▐▌        ▐▌   ▐▌    ▝▚▞▘ ▐▌ ▐▌  █  
-▐▛▀▚▖▐▛▀▀▘▐▛▀▀▘     ▐▛▀▀▘▐▌▝▜▌  ▐▌  ▐▛▀▘   █  
-▐▙▄▞▘▐▙▄▄▖▐▙▄▄▖     ▐▙▄▄▖▝▚▄▞▘  ▐▌  ▐▌     █  
+▗▄▄▖ ▗▄▄▄▖▗▄▄▄▖     ▗▄▄▄▖ ▗▄▄▖▗▖  ▗▖
+▐▌ ▐▌▐▌   ▐▌        ▐▌   ▐▌    ▝▚▞▘ 
+▐▛▀▚▖▐▛▀▀▘▐▛▀▀▘     ▐▛▀▀▘▐▌▝▜▌  ▐▌  
+▐▙▄▞▘▐▙▄▄▖▐▙▄▄▖     ▐▙▄▄▖▝▚▄▞▘  ▐▌  
+
+@By: Loaii abdalslam
     """
 
     styled_final = Text(final_art)
-    styled_final.stylize("green")
+    styled_final.stylize("yellow")
     animation_console.print(styled_final)
 
 def main():
     """
     Main entry point for the script.
     """
+    global auto_yes_mode
+    
     # Initialize terminal logger and file watcher
     # initialize_terminal_logger()  # Disabled to prevent blocking live display
     
@@ -1328,9 +1623,13 @@ def main():
     parser.add_argument("--run-verify", action="store_true", help="Run, verify, and fix the project after completion")
     parser.add_argument("--max-cycles", type=int, default=3, help="Maximum number of run-verify cycles")
     parser.add_argument("--oneshot", action="store_true", help="Run in oneshot mode (no step-by-step confirmation)")
+    parser.add_argument("--auto-yes", action="store_true", help="Automatically answer 'yes' to all prompts")
     parser.add_argument("--no-animation", action="store_true", help="Skip the initial animation")
 
     args = parser.parse_args()
+    
+    # Set auto_yes_mode based on argument
+    auto_yes_mode = args.auto_yes
 
     # Convert path to Path object
     path = Path(args.path).resolve()
