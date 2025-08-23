@@ -317,13 +317,52 @@ class Executor:
             language = language_map.get(extension, "text")
 
         logger.info(f"Generating {language} file: {full_path}")
-
+        
+        # Import rich console for progress display
+        from rich.console import Console
+        from rich.live import Live
+        from rich.text import Text
+        import time
+        import threading
+        
+        console = Console()
+        
         try:
             # Create parent directories if they don't exist
             full_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Generate content
-            content = self.gemini_client.generate_code(content_description, language)
+            # Show progress indicator while generating content
+            progress_text = Text(f"🤖 Generating {language} code for {file_path}")
+            dots = ""
+            stop_animation = False
+            
+            def animate_progress():
+                nonlocal dots, stop_animation
+                while not stop_animation:
+                    for i in range(4):
+                        if stop_animation:
+                            break
+                        dots = "." * i
+                        progress_text.plain = f"🤖 Generating {language} code for {file_path}{dots}"
+                        time.sleep(0.5)
+            
+            # Start animation in a separate thread
+            animation_thread = threading.Thread(target=animate_progress, daemon=True)
+            animation_thread.start()
+            
+            try:
+                with Live(progress_text, console=console, refresh_per_second=2) as live:
+                    # Generate content
+                    content = self.gemini_client.generate_code(content_description, language)
+                    
+                    # Stop animation
+                    stop_animation = True
+                    
+                    # Show completion message
+                    live.update(Text(f"✅ Generated {language} code for {file_path}", style="bold green"))
+                    time.sleep(0.5)  # Brief pause to show completion
+            finally:
+                stop_animation = True
 
             # Extract code from markdown if needed
             clean_content = extract_code_from_markdown(content)
@@ -332,16 +371,24 @@ class Executor:
             with open(full_path, 'w', encoding='utf-8') as f:
                 f.write(clean_content)
 
+            # Show file writing progress
+            console.print(f"💾 Writing content to {file_path}...", style="yellow")
+            
             # Log the file creation
             content_preview = content[:200] + ("..." if len(content) > 200 else "")
             self.log_capture.log_file_operation("create", str(full_path), content_preview)
+            
+            # Show success message with file size
+            file_size = len(clean_content)
+            console.print(f"✅ Successfully created {file_path} ({file_size} characters)", style="bold green")
 
             return {
                 "file_path": str(full_path),
                 "relative_path": str(file_path),
                 "language": language,
                 "success": True,
-                "content_preview": content_preview
+                "content_preview": content_preview,
+                "file_size": file_size
             }
         except Exception as e:
             logger.error(f"Error generating file {full_path}: {e}")

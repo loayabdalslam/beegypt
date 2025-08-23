@@ -35,6 +35,12 @@ BATCH_DELAY_SECONDS = float(os.getenv("BATCH_DELAY_SECONDS", "5.0"))  # Delay in
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Maximum number of retries for rate-limited requests
 INITIAL_RETRY_DELAY = float(os.getenv("INITIAL_RETRY_DELAY", "2.0"))  # Initial delay before retrying
 
+# Timeout Configuration
+API_TIMEOUT_SECONDS = float(os.getenv("API_TIMEOUT_SECONDS", "30.0"))  # Default API timeout in seconds
+GEMINI_TIMEOUT_MS = int(os.getenv("GEMINI_TIMEOUT_MS", "30000"))  # Gemini API timeout in milliseconds
+CONNECTION_TIMEOUT = float(os.getenv("CONNECTION_TIMEOUT", "10.0"))  # Connection timeout in seconds
+READ_TIMEOUT = float(os.getenv("READ_TIMEOUT", "60.0"))  # Read timeout in seconds
+
 # Multimodal Configuration
 ENABLE_MULTIMODAL = os.getenv("ENABLE_MULTIMODAL", "True").lower() in ["true", "1", "yes"]  # Enable multimodal features
 MULTIMODAL_PROVIDER = os.getenv("MULTIMODAL_PROVIDER", "openai").lower()  # Provider for multimodal features

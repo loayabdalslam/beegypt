@@ -35,6 +35,15 @@ from agent.deployer import LocalDeployer
 from agent.log_capture import MarkdownLogCapture
 from agent.consolidated_log import ConsolidatedLogManager
 from agent.package_handler import PackageHandler
+from agent.terminal_logger import get_terminal_logger, initialize_terminal_logger
+from agent.file_watcher import get_file_watcher, start_file_watching, stop_file_watching
+from agent.code_optimizer import get_code_optimizer, initialize_code_optimizer, optimize_file_path
+from agent.shadcn_integration import get_shadcn_integration, initialize_shadcn_integration, perform_shadcn_health_check
+from agent.context7_integration import get_context7_integration, initialize_context7_integration
+from agent.unified_mcp_integration import (
+    get_unified_mcp_integration, initialize_unified_mcp_integration,
+    generate_project_with_mcp, modify_project_with_mcp
+)
 from config import OUTPUT_DIR
 
 # Import other modules
@@ -88,6 +97,9 @@ class CodeAgent:
 
         # Initialize logger (will be properly set up once we have a project name and directory)
         self.logger = None
+        
+        # Track installation status to prevent nested loops
+        self.dependencies_installed = False
 
     def process_project_description(self, description: str) -> Dict:
         """
@@ -250,6 +262,7 @@ class CodeAgent:
     def setup_project(self) -> Dict:
         """
         Set up the project structure based on the plan.
+        Only creates directories and essential files, leaving code generation to tasks.
 
         Returns:
             Dictionary with setup results
@@ -277,9 +290,10 @@ class CodeAgent:
         # Extract directory structure from the plan
         console.print("\n[bold yellow]Creating project structure...[/bold yellow]")
 
-        # Generate a prompt to extract the directory structure
+        # Generate a prompt to extract ONLY the directory structure
         structure_prompt = f"""
-        Based on the following project plan, generate a detailed directory structure and initial files to create:
+        Based on the following project plan, generate ONLY a directory structure without any file content.
+        Do not generate any code files - only create the folder structure.
 
         {self.project_plan.get('raw_plan', '')}
 
@@ -290,17 +304,11 @@ class CodeAgent:
                 "path/to/directory2",
                 ...
             ],
-            "files": [
-                {{
-                    "path": "path/to/file1",
-                    "description": "Detailed description of what this file should contain",
-                    "language": "programming language"
-                }},
-                ...
-            ]
+            "files": []
         }}
 
         Include only the JSON output without any additional text.
+        IMPORTANT: Leave the "files" array empty - all file generation will be handled by the planned tasks.
         """
 
         structure_text = self.ai_client.generate_text(structure_prompt)
@@ -319,8 +327,14 @@ class CodeAgent:
 
             # Update executor to use project directory
             self.executor = Executor(self.ai_client, self.project_dir)
+            
+            # Initialize code optimizer
+            initialize_code_optimizer()
+            
+            # Initialize unified MCP integration
+            initialize_unified_mcp_integration(self.project_dir)
 
-            # Set up the project structure
+            # Set up ONLY the directory structure (no file generation)
             setup_result = self.executor.setup_project_structure(structure)
 
             # Display results
@@ -331,17 +345,22 @@ class CodeAgent:
                     console.print(f"  - {directory}")
                     self.logger.log_text(f"- {directory}")
 
-            if setup_result["created_files"]:
-                console.print("\n[bold green]Created files:[/bold green]")
-                self.logger.start_subsection("Created Files")
-                for file_path in setup_result["created_files"]:
+            # Only create essential package files (package.json, requirements.txt, etc.)
+            # but not application code files
+            package_handler = PackageHandler(self.project_dir)
+            package_results = package_handler.ensure_package_files({"directories": structure.get("directories", []), "files": []})
+            
+            if package_results.get("created_files"):
+                console.print("\n[bold green]Created essential files:[/bold green]")
+                self.logger.start_subsection("Created Essential Files")
+                for file_path in package_results["created_files"]:
                     console.print(f"  - {file_path}")
                     self.logger.log_text(f"- {file_path}")
 
-            if setup_result["errors"]:
+            if setup_result["errors"] or package_results.get("errors"):
                 console.print("\n[bold red]Errors:[/bold red]")
                 self.logger.start_subsection("Errors")
-                for error in setup_result["errors"]:
+                for error in setup_result["errors"] + package_results.get("errors", []):
                     console.print(f"  - {error}")
                     self.logger.log_text(f"- ❌ {error}")
 
@@ -363,19 +382,160 @@ class CodeAgent:
             # Save the logger
             self.logger.save()
 
-            # Open the project in a code editor
-            self.open_in_editor()
+            console.print("\n[bold green]✅ Project structure ready! All code generation will be handled by the planned tasks.[/bold green]")
 
             return {
                 "success": True,
                 "directories_created": len(setup_result["created_directories"]),
-                "files_created": len(setup_result["created_files"]),
-                "errors": setup_result["errors"]
+                "files_created": len(package_results.get("created_files", [])),
+                "errors": setup_result["errors"] + package_results.get("errors", [])
             }
         except Exception as e:
             logger.error(f"Error setting up project structure: {e}")
             console.print(f"[bold red]Error setting up project structure:[/bold red] {str(e)}")
             return {"success": False, "error": str(e)}
+
+    def _optimize_created_files(self, created_files: List[str]) -> None:
+        """
+        Optimize created code files using the code optimizer.
+        
+        Args:
+            created_files: List of file paths that were created
+        """
+        if not created_files:
+            return
+            
+        console.print("\n[bold cyan]Optimizing created files...[/bold cyan]")
+        
+        code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.cs', '.go', '.rs', '.php', '.rb'}
+        
+        for file_path_str in created_files:
+            try:
+                file_path = Path(file_path_str)
+                
+                # Only optimize code files
+                if file_path.suffix.lower() in code_extensions and file_path.exists():
+                    console.print(f"  Analyzing: {file_path.name}")
+                    
+                    # Use the code optimizer to analyze and potentially optimize the file
+                    optimizer = get_code_optimizer()
+                    if optimizer:
+                        result = optimizer.analyze_file(str(file_path))
+                        
+                        if result and result.suggestions:
+                            console.print(f"    Found {len(result.suggestions)} optimization suggestions")
+                            
+                            # Log optimization results
+                            self.logger.log_text(f"Code optimization for {file_path.name}:")
+                            for suggestion in result.suggestions[:3]:  # Show top 3 suggestions
+                                self.logger.log_text(f"  - {suggestion.type.value}: {suggestion.description}")
+                        else:
+                            console.print(f"    No optimization suggestions found")
+                            
+            except Exception as e:
+                console.print(f"  [yellow]Warning: Could not optimize {file_path_str}: {str(e)}[/yellow]")
+                logger.warning(f"Code optimization failed for {file_path_str}: {e}")
+ 
+    def _check_shadcn_integration(self) -> None:
+         """
+         Check shadcn-ui integration status and provide recommendations.
+         """
+         try:
+             console.print("\n[bold cyan]Checking shadcn-ui integration...[/bold cyan]")
+             
+             # Perform health check
+             shadcn_integration = get_shadcn_integration(self.project_dir)
+             health_result = shadcn_integration.perform_health_check()
+             
+             # Log results
+             if health_result.is_healthy:
+                 self.logger.log_text("✅ shadcn-ui integration is healthy")
+             else:
+                 self.logger.log_text("⚠️ shadcn-ui integration issues detected:")
+                 for issue in health_result.issues[:3]:  # Show top 3 issues
+                     self.logger.log_text(f"  - {issue}")
+                 
+                 if health_result.recommendations:
+                     self.logger.log_text("Recommendations:")
+                     for rec in health_result.recommendations[:3]:  # Show top 3 recommendations
+                         self.logger.log_text(f"  - {rec}")
+             
+             # Suggest components for common web features
+             if health_result.project_type:
+                 common_features = ["form", "navigation", "data display", "user feedback"]
+                 for feature in common_features:
+                     suggestions = shadcn_integration.suggest_components_for_feature(feature)
+                     if suggestions:
+                         console.print(f"  [dim]For {feature}: {', '.join(suggestions[:3])}[/dim]")
+                         
+         except Exception as e:
+             console.print(f"  [yellow]Warning: Could not check shadcn-ui integration: {str(e)}[/yellow]")
+             logger.warning(f"shadcn-ui integration check failed: {e}")
+
+    def _enhance_project_with_mcp(self) -> None:
+         """Enhance the project using unified MCP integration for Context7 and ShadCN"""
+         try:
+             console.print("\n[bold blue]🚀 Enhancing project with MCP integration...[/bold blue]")
+             self.logger.start_subsection("MCP Integration Enhancement")
+             
+             # Get unified MCP integration
+             unified_integration = get_unified_mcp_integration()
+             if not unified_integration:
+                 console.print("  [yellow]Warning: Unified MCP integration not available[/yellow]")
+                 return
+             
+             # Analyze project structure
+             analysis = unified_integration.analyze_project_structure()
+             project_type = analysis.get('project_type', 'unknown')
+             
+             console.print(f"  [dim]Detected project type: {project_type}[/dim]")
+             self.logger.log_text(f"Detected project type: {project_type}")
+             
+             # Get intelligent suggestions based on project analysis
+             if project_type in ['react', 'nextjs', 'vue', 'angular']:
+                 # Get Context7 suggestions for libraries and best practices
+                 context7_integration = get_context7_integration()
+                 if context7_integration:
+                     # Suggest relevant libraries based on project type
+                     library_suggestions = context7_integration.suggest_libraries_for_project(project_type)
+                     if library_suggestions:
+                         console.print("  [dim]📚 Recommended libraries:[/dim]")
+                         self.logger.log_text("Recommended libraries:")
+                         for lib in library_suggestions[:3]:  # Show top 3
+                             console.print(f"    - {lib.name}: {lib.description[:60]}...")
+                             self.logger.log_text(f"  - {lib.name}: {lib.description}")
+                 
+                 # Get ShadCN component suggestions
+                 shadcn_integration = get_shadcn_integration()
+                 if shadcn_integration:
+                     # Suggest components based on common web app patterns
+                     common_patterns = ['navigation', 'forms', 'data-display', 'feedback']
+                     console.print("  [dim]🎨 Suggested UI components:[/dim]")
+                     self.logger.log_text("Suggested UI components:")
+                     
+                     for pattern in common_patterns:
+                         suggestions = shadcn_integration.suggest_components_for_feature(pattern)
+                         if suggestions:
+                             component_list = ', '.join(suggestions[:2])  # Show top 2 per pattern
+                             console.print(f"    - For {pattern}: {component_list}")
+                             self.logger.log_text(f"  - For {pattern}: {component_list}")
+             
+             # Generate integration recommendations
+             recommendations = unified_integration.get_integration_recommendations()
+             if recommendations:
+                 console.print("  [dim]💡 Integration recommendations:[/dim]")
+                 self.logger.log_text("Integration recommendations:")
+                 for rec in recommendations[:3]:  # Show top 3
+                     console.print(f"    - {rec}")
+                     self.logger.log_text(f"  - {rec}")
+             
+             # Log completion
+             console.print("  [green]✅ MCP integration enhancement completed[/green]")
+             self.logger.log_text("✅ MCP integration enhancement completed")
+             
+         except Exception as e:
+             console.print(f"  [yellow]Warning: Could not enhance project with MCP integration: {str(e)}[/yellow]")
+             logger.warning(f"MCP integration enhancement failed: {e}")
 
     def execute_task(self, task_index: int) -> Dict:
         """
@@ -553,8 +713,8 @@ class CodeAgent:
                     file_path = change.get("file_path", "")
                     description = change.get("description", "No description")
 
-                    console.print(f"\n[bold cyan]File:[/bold cyan] {file_path}")
-                    console.print(f"[italic]{description}[/italic]")
+                    console.print(f"\n[bold cyan]📄 Creating file:[/bold cyan] {file_path}")
+                    console.print(f"[italic]📝 {description}[/italic]")
 
                     # Determine the language from the file extension
                     language = None
@@ -578,17 +738,18 @@ class CodeAgent:
                         }
                         language = language_map.get(extension.lower())
 
-                    # Generate the file
+                    # Generate the file (now with streaming progress)
                     result = self.executor.generate_file(file_path, description, language)
 
                     if result["success"]:
-                        console.print(f"[bold green]Generated file:[/bold green] {result['file_path']}")
-                        console.print(f"Preview: {result['content_preview']}")
+                        # Show a brief summary since detailed progress was already shown
+                        file_size = result.get('file_size', 0)
+                        console.print(f"[dim]📊 File created: {file_size} characters[/dim]")
 
                         # Log the file generation in the markdown log
                         self.log_capture.log_file_operation("create", result['file_path'], result['content_preview'])
                     else:
-                        console.print(f"[bold red]Error generating file:[/bold red] {result.get('error', 'Unknown error')}")
+                        console.print(f"[bold red]❌ Error generating file:[/bold red] {result.get('error', 'Unknown error')}")
 
                         # Log the file generation error in the markdown log
                         self.log_capture.log_error(result.get('error', 'Unknown error'),
@@ -768,8 +929,19 @@ Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             if self.logger:
                 self.logger.log_text(f"Detected project type: {project_type}")
 
+            # Check if dependencies are already installed
+            if self.dependencies_installed:
+                console.print("[yellow]Dependencies already installed, skipping installation...[/yellow]")
+                if self.logger:
+                    self.logger.log_text("Dependencies already installed, skipping installation")
+                return {"success": True, "message": "Project already deployed", "skipped_installation": True}
+
             # Deploy the project
             result = deployer.deploy_locally()
+            
+            # Mark dependencies as installed if deployment was successful
+            if result["success"]:
+                self.dependencies_installed = True
 
             if result["success"]:
                 console.print(f"[bold green]{result['message']}[/bold green]")
@@ -1137,6 +1309,9 @@ def main():
     """
     Main entry point for the script.
     """
+    # Initialize terminal logger and file watcher
+    # initialize_terminal_logger()  # Disabled to prevent blocking live display
+    
     # Display the bee animation
     display_bee_animation()
 
@@ -1171,6 +1346,10 @@ def main():
     }
 
     try:
+        # Start file watching for the project directory
+        # console.print(f"[dim]Starting file watcher for {path}...[/dim]")
+        # start_file_watching([path])  # Disabled to prevent terminal logger initialization
+        
         # Skip animation if requested
         if not args.no_animation:
             # Display a simple loading animation for project analysis
@@ -1266,6 +1445,14 @@ def main():
         console.print(f"[bold red]Error: {str(e)}[/bold red]")
         logger.exception("Unhandled exception")
         return 1
+    finally:
+        # Clean up file watcher
+        # try:
+        #     console.print("[dim]Stopping file watcher...[/dim]")
+        #     stop_file_watching()
+        # except Exception as cleanup_error:
+        #     logger.error(f"Error stopping file watcher: {cleanup_error}")
+        pass
 
 # Add __del__ method to CodeAgent class
 def __del__(self):

@@ -7,8 +7,14 @@ from typing import Dict, Optional
 class BaseAIClient(ABC):
     """Abstract base class for AI provider clients."""
 
+    # Base prompt inspired by the bee philosophy
+    BEE_BASE_PROMPT = "\n\nBe like the bee, it eats good things, produces good things, and when it lands on a branch, it does not break it, and when it lands on a flower, it does not scratch it."
+    
     # Common instruction to add to all prompts
     CALM_INSTRUCTION = "\n\nIMPORTANT: You have to take the answer that came to you and do not rush the matter, do not rush the response and do not rush your algorithms. Take your time and answer very calmly."
+    
+    # Combined base prompt with bee philosophy and calm instruction
+    BASE_PROMPT = BEE_BASE_PROMPT + CALM_INSTRUCTION
 
     @abstractmethod
     def generate_text(self, prompt: str, temperature: Optional[float] = None) -> str:

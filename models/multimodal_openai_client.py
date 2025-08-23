@@ -64,8 +64,8 @@ class MultimodalOpenAIClient(MultimodalAIClient):
             # Log the prompt for debugging
             logger.debug(f"Sending prompt to OpenAI (length: {len(prompt)}):\\n{prompt[:500]}...")
             
-            # Add the calm instruction to the prompt
-            prompt_with_instruction = prompt + self.CALM_INSTRUCTION
+            # Add the base prompt (bee philosophy + calm instruction) to the prompt
+            prompt_with_instruction = prompt + self.BASE_PROMPT
             
             # Define a function to make the API call
             def make_api_call():
@@ -120,8 +120,8 @@ class MultimodalOpenAIClient(MultimodalAIClient):
             logger.info(f"Analyzing image: {image_path}")
             logger.debug(f"Prompt: {prompt[:500]}...")
             
-            # Add the calm instruction to the prompt
-            prompt_with_instruction = prompt + self.CALM_INSTRUCTION
+            # Add the base prompt (bee philosophy + calm instruction) to the prompt
+            prompt_with_instruction = prompt + self.BASE_PROMPT
             
             # Define a function to make the API call
             def make_api_call():
@@ -190,8 +190,8 @@ class MultimodalOpenAIClient(MultimodalAIClient):
             logger.info(f"Generating content from image: {image_path}")
             logger.debug(f"Prompt: {prompt[:500]}...")
             
-            # Add the calm instruction to the prompt
-            prompt_with_instruction = prompt + self.CALM_INSTRUCTION
+            # Add the base prompt (bee philosophy + calm instruction) to the prompt
+            prompt_with_instruction = prompt + self.BASE_PROMPT
             
             # Define a function to make the API call
             def make_api_call():
@@ -253,9 +253,10 @@ class MultimodalOpenAIClient(MultimodalAIClient):
             {prompt}
             
             Provide only the code without explanations. Ensure the code is complete, well-structured, and follows best practices.
-            
-            IMPORTANT: You have to take the answer that came to you and do not rush the matter, do not rush the response and do not rush your algorithms. Take your time and answer very calmly.
             """
+            
+            # Add the base prompt (bee philosophy + calm instruction)
+            code_prompt += self.BASE_PROMPT
             
             # Log the prompt for debugging
             logger.debug(f"Sending code prompt to OpenAI (language: {language}, length: {len(code_prompt)}):\\n{code_prompt[:500]}...")

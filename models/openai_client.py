@@ -72,8 +72,8 @@ class OpenAIClient(BaseAIClient):
             # Set temperature if provided, otherwise use default
             temp = temperature if temperature is not None else DEFAULT_TEMPERATURE
 
-            # Add the calm instruction to the prompt
-            prompt_with_instruction = prompt + self.CALM_INSTRUCTION
+            # Add the base prompt (bee philosophy + calm instruction) to the prompt
+            prompt_with_instruction = prompt + self.BASE_PROMPT
 
             # Log the prompt for debugging
             logger.debug(f"Sending prompt to OpenAI (length: {len(prompt_with_instruction)}):\\n{prompt_with_instruction[:500]}...")
@@ -121,9 +121,10 @@ class OpenAIClient(BaseAIClient):
         {prompt}
 
         Provide only the code without explanations. Ensure the code is complete, well-structured, and follows best practices.
-
-        IMPORTANT: You have to take the answer that came to you and do not rush the matter, do not rush the response and do not rush your algorithms. Take your time and answer very calmly.
         """
+        
+        # Add the base prompt (bee philosophy + calm instruction)
+        code_prompt += self.BASE_PROMPT
 
         try:
             # Log the prompt for debugging

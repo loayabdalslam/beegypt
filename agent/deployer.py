@@ -252,22 +252,27 @@ class LocalDeployer:
                     "project_type": project_type
                 }
 
-            # Install dependencies
-            logger.info("Installing dependencies...")
-            install_process = subprocess.run(
-                ["npm", "install"],
-                cwd=self.project_dir,
-                capture_output=True,
-                text=True
-            )
+            # Check if dependencies are already installed
+            node_modules_path = self.project_dir / "node_modules"
+            if node_modules_path.exists() and any(node_modules_path.iterdir()):
+                logger.info("Dependencies already installed, skipping npm install...")
+            else:
+                # Install dependencies
+                logger.info("Installing dependencies...")
+                install_process = subprocess.run(
+                    ["npm", "install"],
+                    cwd=self.project_dir,
+                    capture_output=True,
+                    text=True
+                )
 
-            if install_process.returncode != 0:
-                return {
-                    "success": False,
-                    "message": f"Failed to install dependencies: {install_process.stderr}",
-                    "project_type": project_type,
-                    "stderr": install_process.stderr
-                }
+                if install_process.returncode != 0:
+                    return {
+                        "success": False,
+                        "message": f"Failed to install dependencies: {install_process.stderr}",
+                        "project_type": project_type,
+                        "stderr": install_process.stderr
+                    }
 
             # Determine the start command based on project type
             if project_type == "nextjs":
@@ -346,21 +351,50 @@ class LocalDeployer:
 
             # Install dependencies
             if (self.project_dir / "requirements.txt").exists():
-                logger.info("Installing dependencies...")
-                install_process = subprocess.run(
-                    [pip_cmd, "install", "-r", "requirements.txt"],
-                    cwd=self.project_dir,
-                    capture_output=True,
-                    text=True
-                )
+                # Check if dependencies are already installed by checking site-packages
+                site_packages_dir = venv_dir / ("Lib/site-packages" if platform.system() == "Windows" else "lib/python*/site-packages")
+                
+                # Simple check: if site-packages has more than just basic packages, assume deps are installed
+                deps_installed = False
+                if platform.system() == "Windows":
+                    site_packages_path = venv_dir / "Lib" / "site-packages"
+                else:
+                    # Find the python version directory
+                    lib_dir = venv_dir / "lib"
+                    if lib_dir.exists():
+                        python_dirs = list(lib_dir.glob("python*"))
+                        if python_dirs:
+                            site_packages_path = python_dirs[0] / "site-packages"
+                        else:
+                            site_packages_path = None
+                    else:
+                        site_packages_path = None
+                
+                if site_packages_path and site_packages_path.exists():
+                    # Count non-standard packages (exclude pip, setuptools, etc.)
+                    installed_packages = [d for d in site_packages_path.iterdir() 
+                                        if d.is_dir() and not d.name.startswith('_') 
+                                        and d.name not in ['pip', 'setuptools', 'pkg_resources']]
+                    deps_installed = len(installed_packages) > 3  # Basic threshold
+                
+                if deps_installed:
+                    logger.info("Dependencies already installed, skipping pip install...")
+                else:
+                    logger.info("Installing dependencies...")
+                    install_process = subprocess.run(
+                        [pip_cmd, "install", "-r", "requirements.txt"],
+                        cwd=self.project_dir,
+                        capture_output=True,
+                        text=True
+                    )
 
-                if install_process.returncode != 0:
-                    return {
-                        "success": False,
-                        "message": f"Failed to install dependencies: {install_process.stderr}",
-                        "project_type": project_type,
-                        "stderr": install_process.stderr
-                    }
+                    if install_process.returncode != 0:
+                        return {
+                            "success": False,
+                            "message": f"Failed to install dependencies: {install_process.stderr}",
+                            "project_type": project_type,
+                            "stderr": install_process.stderr
+                        }
 
             # Determine the start command based on project type
             if project_type == "flask":

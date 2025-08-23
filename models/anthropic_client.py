@@ -72,8 +72,8 @@ class AnthropicClient(BaseAIClient):
             # Set temperature if provided, otherwise use default
             temp = temperature if temperature is not None else DEFAULT_TEMPERATURE
 
-            # Add the calm instruction to the prompt
-            prompt_with_instruction = prompt + self.CALM_INSTRUCTION
+            # Add the base prompt (bee philosophy + calm instruction) to the prompt
+            prompt_with_instruction = prompt + self.BASE_PROMPT
 
             # Log the prompt for debugging
             logger.debug(f"Sending prompt to Anthropic (length: {len(prompt_with_instruction)}):\\n{prompt_with_instruction[:500]}...")
