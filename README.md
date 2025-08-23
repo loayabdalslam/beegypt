@@ -28,92 +28,62 @@ BeeAgent is a unified interface for creating or editing projects using AI. It ca
 
 ## Usage
 
-### Using BeeAgent (Original)
+BeeAgent is run via the `main.py` script. It has two primary modes:
 
-```bash
-python beeagent.py --path /path/to/project --prompt "Your project description or edit request"
-```
+1.  **Step-by-Step Mode (Default)**: An interactive mode that guides you through project creation or editing, asking for confirmation at each major step.
+2.  **Oneshot Mode (`--oneshot`)**: A non-interactive mode that runs the entire process automatically, which is useful for scripting.
 
-### Using Step-by-Step Mode (New)
+### Step-by-Step Mode (Default)
 
 ```bash
 python main.py --path /path/to/project --prompt "Your project description or edit request"
 ```
 
-### Creating a New Project
+### Oneshot Mode
 
 ```bash
-python beeagent.py --path ./my-new-project --prompt "Create a React todo list application with local storage"
-```
-
-### Editing an Existing Project
-
-```bash
-python beeagent.py --path ./my-existing-project --prompt "Add dark mode support to the application"
+python main.py --path /path/to/project --prompt "Your project description or edit request" --oneshot
 ```
 
 ## Command-Line Options
 
-### Common Options (Both Scripts)
-
-- `--path`: Path to the project directory (required)
-- `--prompt`: Project description or edit request (required)
-- `--no-editor`: Don't open the code editor after completion
-- `--no-deploy`: Don't deploy the project locally
-- `--no-code-generators`: Don't use code generators (for new projects)
-- `--force-create`: Force create a new project even if the directory exists
-- `--force-edit`: Force edit mode even if the directory doesn't look like a project
-- `--diff`: Show diff of changes after operation completes
-- `--run-verify`: Run, verify, and fix the project after completion
-- `--max-cycles`: Maximum number of run-verify cycles
-
-### Additional Options for main.py
-
-- `--oneshot`: Run in oneshot mode (no step-by-step confirmation)
-- `--no-animation`: Skip the initial animation
+- `--path`: Path to the project directory (required).
+- `--prompt`: Project description or edit request (required).
+- `--oneshot`: Run in oneshot mode (no step-by-step confirmation).
+- `--no-editor`: Don't open the code editor after completion.
+- `--no-deploy`: Don't deploy the project locally.
+- `--no-code-generators`: Don't use code generators (for new projects).
+- `--force-create`: Force create a new project even if the directory exists.
+- `--force-edit`: Force edit mode even if the directory doesn't look like a project.
+- `--diff`: Show diff of changes after operation completes.
+- `--run-verify`: Run, verify, and fix the project after completion.
+- `--max-cycles`: Maximum number of run-verify cycles.
+- `--no-animation`: Skip the initial startup animation.
 
 ## Examples
 
-### Create a New Web Application
+### Create a New Web Application (Interactive)
 
 ```bash
-python beeagent.py --path ./my-web-app --prompt "Create a responsive portfolio website with a projects section, about me page, and contact form"
+python main.py --path ./my-web-app --prompt "Create a responsive portfolio website with a projects section, about me page, and contact form"
+```
+
+### Create a New Web Application (Automatic)
+
+```bash
+python main.py --path ./my-web-app --prompt "Create a responsive portfolio website with a projects section, about me page, and contact form" --oneshot
 ```
 
 ### Add Features to an Existing Project
 
 ```bash
-python beeagent.py --path ./my-web-app --prompt "Add a blog section with pagination and categories"
+python main.py --path ./my-web-app --prompt "Add a blog section with pagination and categories"
 ```
 
 ### Fix Issues in an Existing Project
 
 ```bash
-python beeagent.py --path ./my-web-app --prompt "Fix the mobile navigation menu that doesn't close when clicking outside"
-```
-
-### Create a Project Without Using Code Generators
-
-```bash
-python beeagent.py --path ./my-react-app --prompt "Create a React weather app" --no-code-generators
-```
-
-### Create a Project with Step-by-Step Confirmation
-
-```bash
-python main.py --path ./my-react-app --prompt "Create a React weather app"
-```
-
-### Create a Project in Oneshot Mode (No Step-by-Step)
-
-```bash
-python main.py --path ./my-react-app --prompt "Create a React weather app" --oneshot
-```
-
-### Create a Project Without Animation
-
-```bash
-python main.py --path ./my-react-app --prompt "Create a React weather app" --no-animation
+python main.py --path ./my-web-app --prompt "Fix the mobile navigation menu that doesn't close when clicking outside"
 ```
 
 ## How It Works
@@ -127,41 +97,17 @@ BeeAgent determines whether a path contains an existing project by checking for 
 - General project files: .git, README.md, LICENSE, etc.
 
 Based on this detection, it either:
-1. Creates a new project using the optimized 5-step workflow, or
-2. Edits an existing project using the fix_project functionality
+1. Creates a new project using the optimized 5-step workflow (in step-by-step mode), or
+2. Edits an existing project.
 
 ### New Project Creation Workflow (5 Steps)
 
-1. **Package Files Creation**: Creates package.json, requirements.txt, etc. without installing dependencies
-2. **Gitignore Generation**: Creates technology-specific .gitignore file before any other project files
-3. **Git Repository Initialization**: Sets up version control
-4. **Project Structure Creation**: Generates all project files and directories with duplicate cleanup
-5. **Dependency Installation**: Installs all dependencies as the final step
+1. **Package Files Creation**: Creates package.json, requirements.txt, etc. without installing dependencies.
+2. **Gitignore Generation**: Creates technology-specific .gitignore file before any other project files.
+3. **Git Repository Initialization**: Sets up version control.
+4. **Project Structure Creation**: Generates all project files and directories with duplicate cleanup.
+5. **Dependency Installation**: Installs all dependencies as the final step.
 
 This workflow prevents common issues like nested project structures, duplicate package files, and installation conflicts.
 
 You can override the automatic detection using the `--force-create` or `--force-edit` flags.
-
-## Differences Between beeagent.py and main.py
-
-### beeagent.py
-- Original implementation
-- Runs in oneshot mode by default
-- May use package initializers in some cases
-
-### main.py
-- Updated implementation with optimized 5-step project creation workflow
-- Runs in step-by-step mode by default with user confirmation at each stage
-- Never uses package initializers (creates all files manually)
-- Includes intelligent duplicate structure detection and cleanup
-- Generates technology-specific .gitignore files automatically
-- Prioritizes package file creation and delays dependency installation until the end
-- Includes terminal animations and visual feedback
-- Provides more detailed logging
-- Supports all the same features as beeagent.py plus additional options
-
-## How to Choose
-
-- Use `beeagent.py` for quick, automated project creation and editing
-- Use `main.py` when you want more control over the process and want to see/confirm each step
-- Use `main.py --oneshot` when you want the benefits of the updated implementation but still want it to run automatically

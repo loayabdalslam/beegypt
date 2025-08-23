@@ -10,7 +10,6 @@ import json
 import argparse
 import sys
 import time
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, List, Union
@@ -35,6 +34,7 @@ from agent.deployer import LocalDeployer
 from agent.log_capture import MarkdownLogCapture
 from agent.consolidated_log import ConsolidatedLogManager
 from agent.package_handler import PackageHandler
+from agent.strategies import StrategyFactory
 from agent.terminal_logger import get_terminal_logger, initialize_terminal_logger
 from agent.file_watcher import get_file_watcher, start_file_watching, stop_file_watching
 from agent.code_optimizer import get_code_optimizer, initialize_code_optimizer, optimize_file_path
@@ -109,6 +109,7 @@ class CodeAgent:
 
         # Initialize logger (will be properly set up once we have a project name and directory)
         self.logger = None
+        self.strategy = None
         
         # Track installation status to prevent nested loops
         self.dependencies_installed = False
@@ -125,142 +126,21 @@ class CodeAgent:
         """
         console.print(Panel("[bold blue]Processing Project Description[/bold blue]"))
 
-        # Parse the project description
         self.project_description = parse_project_description(description)
 
-        # Generate an AI name for the project
-        console.print("\n[bold yellow]Generating AI project name...[/bold yellow]")
-        name_prompt = f"""
-        Generate a creative, memorable, and relevant project name for the following project description:
+        # Determine and set the project strategy
+        project_type_str = self.project_description.get("technologies", [""])[0]
+        self.strategy = StrategyFactory.get_strategy(project_type_str)
 
-        {description}
+        self.project_name = self._generate_project_name(description)
 
-        The name should be short (1-3 words), catchy, and reflect the purpose or main features of the project.
-        Return ONLY the name without any explanation or additional text.
-        """
+        self._setup_project_directory()
+        self._initialize_logging_and_execution()
+        self._display_project_info()
 
-        try:
-            ai_project_name = self.ai_client.generate_text(name_prompt).strip()
-            # Clean up the name to be filesystem-friendly
-            import re
-            clean_name = re.sub(r'[^\w\s-]', '', ai_project_name).strip()
-            clean_name = re.sub(r'[\s]+', '-', clean_name).lower()
+        if not self._generate_and_log_plan(description):
+            return {"success": False, "error": "Failed to generate project plan"}
 
-            if clean_name:
-                self.project_name = clean_name
-            else:
-                self.project_name = self.project_description['project_name']
-        except Exception as e:
-            logger.warning(f"Error generating AI project name: {e}")
-            self.project_name = self.project_description['project_name']
-
-        # Create project directory in the output folder
-        self.project_dir = self.output_dir / self.project_name
-
-        # Check if we're already in a project directory with the same name
-        # This prevents nested project creation
-        import os
-        current_dir = Path(os.getcwd())
-        if current_dir.name == self.project_name and str(self.output_dir) in str(current_dir):
-            logger.warning(f"Already in a directory named {self.project_name}, using current directory")
-            self.project_dir = current_dir
-        else:
-            # Create the project directory
-            self.project_dir.mkdir(exist_ok=True, parents=True)
-
-            # Change the current working directory to the project directory
-            # This ensures all relative paths are resolved relative to the project directory
-            os.chdir(self.project_dir)
-            logger.info(f"Changed working directory to: {self.project_dir}")
-
-        # Initialize the executor with the project directory as working directory
-        self.executor = Executor(self.ai_client, working_dir=self.project_dir)
-        logger.info(f"Initialized executor with working directory: {self.project_dir}")
-
-        # Initialize the logger
-        self.logger = MarkdownLogger(self.project_dir, self.project_name)
-        self.logger.start_section("Project Initialization")
-        self.logger.log_text(f"Project Name: {self.project_name}")
-        self.logger.log_text(f"Project Directory: {self.project_dir}")
-
-        # Initialize the log capture
-        log_dir = self.project_dir / "logs"
-        self.log_capture = MarkdownLogCapture(log_dir, "agent_log")
-        self.log_capture.start_capture()
-        self.log_capture.log_section("Project Initialization", f"Project: {self.project_name}\nDirectory: {self.project_dir}")
-
-        console.print(f"Project Name: [bold]{self.project_name}[/bold]")
-        console.print(f"Project Directory: [bold]{self.project_dir}[/bold]")
-
-        if self.project_description["technologies"]:
-            console.print("Technologies:")
-            tech_list = []
-            for tech in self.project_description["technologies"]:
-                console.print(f"  - {tech}")
-                tech_list.append(tech)
-            self.logger.log_text("**Technologies:**")
-            self.logger.log_text("\n".join([f"- {tech}" for tech in tech_list]))
-
-        if self.project_description["features"]:
-            console.print("Features:")
-            feature_list = []
-            for feature in self.project_description["features"]:
-                console.print(f"  - {feature}")
-                feature_list.append(feature)
-            self.logger.log_text("**Features:**")
-            self.logger.log_text("\n".join([f"- {feature}" for feature in feature_list]))
-
-        console.print("\n[bold yellow]Generating project plan and tasks...[/bold yellow]")
-
-        # Generate project plan and tasks in a single call to reduce API usage
-        combined_result = self.planner.generate_plan_and_tasks(description)
-
-        if "error" in combined_result:
-            console.print(f"[bold red]Error generating project plan:[/bold red] {combined_result['error']}")
-            return {"success": False, "error": combined_result["error"]}
-
-        # Extract plan from combined result
-        self.project_plan = {
-            "raw_plan": combined_result.get("raw_plan", ""),
-            "structured_plan": combined_result.get("structured_plan", {})
-        }
-
-        # Display the plan
-        console.print("\n[bold green]Project Plan Generated:[/bold green]")
-        console.print(Markdown(self.project_plan["raw_plan"]))
-
-        # Log the plan
-        self.logger.start_section("Project Plan")
-        self.logger.log_plan(self.project_plan)
-
-        # Get tasks from the combined result
-        self.tasks = combined_result.get("tasks", [])
-
-        # If no tasks were generated, try to extract them from the plan
-        if not self.tasks:
-            console.print("\n[bold yellow]Extracting development tasks from plan...[/bold yellow]")
-            try:
-                self.tasks = self.planner.generate_tasks(self.project_plan)
-
-                if not self.tasks:
-                    console.print("[bold red]Error generating tasks: No tasks were returned[/bold red]")
-                    return {"success": False, "error": "Failed to generate tasks: No tasks were returned"}
-            except Exception as e:
-                console.print(f"[bold red]Error generating tasks: {str(e)}[/bold red]")
-                return {"success": False, "error": f"Failed to generate tasks: {str(e)}"}
-
-        # Display tasks
-        console.print(f"\n[bold green]Generated {len(self.tasks)} tasks[/bold green]")
-        for i, task in enumerate(self.tasks):
-            console.print(f"{i+1}. [bold]{task.get('task name', task.get('name', f'Task {i+1}'))}[/bold]")
-            if "description" in task:
-                console.print(f"   {task['description']}")
-
-        # Log the tasks
-        self.logger.start_section("Development Tasks")
-        self.logger.log_tasks(self.tasks)
-
-        # Save the project state and logger
         self._save_project_state()
         self.logger.save()
 
@@ -270,6 +150,119 @@ class CodeAgent:
             "plan": self.project_plan,
             "tasks": self.tasks
         }
+
+    def _generate_project_name(self, description: str) -> str:
+        """Generates and cleans a project name from the description."""
+        console.print("\n[bold yellow]Generating AI project name...[/bold yellow]")
+        name_prompt = f"""
+        Generate a creative, memorable, and relevant project name for the following project description:
+
+        {description}
+
+        The name should be short (1-3 words), catchy, and reflect the purpose or main features of the project.
+        Return ONLY the name without any explanation or additional text.
+        """
+        try:
+            ai_project_name = self.ai_client.generate_text(name_prompt).strip()
+            import re
+            clean_name = re.sub(r'[^\w\s-]', '', ai_project_name).strip()
+            clean_name = re.sub(r'[\s]+', '-', clean_name).lower()
+            return clean_name if clean_name else self.project_description['project_name']
+        except Exception as e:
+            logger.warning(f"Error generating AI project name: {e}")
+            return self.project_description['project_name']
+
+    def _setup_project_directory(self) -> None:
+        """Creates the project directory and changes the CWD."""
+        self.project_dir = self.output_dir / self.project_name
+
+        current_dir = Path(os.getcwd())
+        if current_dir.name == self.project_name and str(self.output_dir) in str(current_dir):
+            logger.warning(f"Already in a directory named {self.project_name}, using current directory")
+            self.project_dir = current_dir
+        else:
+            self.project_dir.mkdir(exist_ok=True, parents=True)
+            os.chdir(self.project_dir)
+            logger.info(f"Changed working directory to: {self.project_dir}")
+
+    def _initialize_logging_and_execution(self) -> None:
+        """Initializes the logger, log capture, and executor."""
+        self.executor = Executor(self.ai_client, working_dir=self.project_dir)
+        logger.info(f"Initialized executor with working directory: {self.project_dir}")
+
+        self.logger = MarkdownLogger(self.project_dir, self.project_name)
+        self.logger.start_section("Project Initialization")
+        self.logger.log_text(f"Project Name: {self.project_name}")
+        self.logger.log_text(f"Project Directory: {self.project_dir}")
+
+        log_dir = self.project_dir / "logs"
+        self.log_capture = MarkdownLogCapture(log_dir, "agent_log")
+        self.log_capture.start_capture()
+        self.log_capture.log_section("Project Initialization", f"Project: {self.project_name}\nDirectory: {self.project_dir}")
+
+    def _display_project_info(self) -> None:
+        """Displays project name, directory, technologies, and features."""
+        console.print(f"Project Name: [bold]{self.project_name}[/bold]")
+        console.print(f"Project Directory: [bold]{self.project_dir}[/bold]")
+
+        if self.project_description.get("technologies"):
+            console.print("Technologies:")
+            tech_list = []
+            for tech in self.project_description["technologies"]:
+                console.print(f"  - {tech}")
+                tech_list.append(tech)
+            self.logger.log_text("**Technologies:**")
+            self.logger.log_text("\n".join([f"- {tech}" for tech in tech_list]))
+
+        if self.project_description.get("features"):
+            console.print("Features:")
+            feature_list = []
+            for feature in self.project_description["features"]:
+                console.print(f"  - {feature}")
+                feature_list.append(feature)
+            self.logger.log_text("**Features:**")
+            self.logger.log_text("\n".join([f"- {feature}" for feature in feature_list]))
+
+    def _generate_and_log_plan(self, description: str) -> bool:
+        """Generates, displays, and logs the project plan and tasks."""
+        console.print("\n[bold yellow]Generating project plan and tasks...[/bold yellow]")
+        combined_result = self.planner.generate_plan_and_tasks(description)
+
+        if "error" in combined_result:
+            console.print(f"[bold red]Error generating project plan:[/bold red] {combined_result['error']}")
+            return False
+
+        self.project_plan = {
+            "raw_plan": combined_result.get("raw_plan", ""),
+            "structured_plan": combined_result.get("structured_plan", {})
+        }
+
+        console.print("\n[bold green]Project Plan Generated:[/bold green]")
+        console.print(Markdown(self.project_plan["raw_plan"]))
+        self.logger.start_section("Project Plan")
+        self.logger.log_plan(self.project_plan)
+
+        self.tasks = combined_result.get("tasks", [])
+        if not self.tasks:
+            console.print("\n[bold yellow]Extracting development tasks from plan...[/bold yellow]")
+            try:
+                self.tasks = self.planner.generate_tasks(self.project_plan)
+                if not self.tasks:
+                    console.print("[bold red]Error generating tasks: No tasks were returned[/bold red]")
+                    return False
+            except Exception as e:
+                console.print(f"[bold red]Error generating tasks: {str(e)}[/bold red]")
+                return False
+
+        console.print(f"\n[bold green]Generated {len(self.tasks)} tasks[/bold green]")
+        for i, task in enumerate(self.tasks):
+            console.print(f"{i+1}. [bold]{task.get('task name', task.get('name', f'Task {i+1}'))}[/bold]")
+            if "description" in task:
+                console.print(f"   {task['description']}")
+
+        self.logger.start_section("Development Tasks")
+        self.logger.log_tasks(self.tasks)
+        return True
 
     def setup_project(self) -> Dict:
         """
@@ -283,50 +276,73 @@ class CodeAgent:
             return {"success": False, "error": "No project plan available"}
 
         console.print(Panel("[bold blue]Setting Up Project Structure[/bold blue]"))
-
-        # Log the setup process
         self.logger.start_section("Project Setup")
 
-        # STEP 1: Create package files FIRST (NO INSTALLATION YET)
-        console.print("\n[bold yellow]Step 1: Creating package files (no installation)...[/bold yellow]")
+        package_results = self._setup_package_files_and_gitignore()
+        self._setup_git_repository()
         
-        # Initialize package handler early
+        try:
+            setup_result = self._setup_directory_structure()
+            self._commit_initial_structure()
+            self._install_project_dependencies(package_results.get("created_files", []))
+
+            self.logger.save()
+            console.print("\n[bold green]✅ Project structure ready! All code generation will be handled by the planned tasks.[/bold green]")
+
+            return {
+                "success": True,
+                "directories_created": len(setup_result.get("created_directories", [])),
+                "files_created": len(package_results.get("created_files", [])),
+                "errors": setup_result.get("errors", []) + package_results.get("errors", [])
+            }
+        except Exception as e:
+            logger.error(f"Error setting up project structure: {e}")
+            console.print(f"[bold red]Error setting up project structure:[/bold red] {str(e)}")
+            return {"success": False, "error": str(e)}
+
+    def _setup_package_files_and_gitignore(self) -> Dict:
+        """Creates package files and .gitignore using the selected strategy."""
+        console.print("\n[bold yellow]Step 1: Creating package files and .gitignore...[/bold yellow]")
         package_handler = PackageHandler(self.project_dir)
-        
-        # Create package files based on project plan
-        package_structure = {
-            "project_name": self.project_description.get("project_name", "my-project"),
-            "description": self.project_description.get("description", ""),
-            "project_type": self.project_plan.get("project_type", ""),
-            "technologies": self.project_plan.get("technologies", []),
-            "directories": [],
-            "files": []
-        }
-        
+
+        if self.strategy:
+            package_structure = self.strategy.get_package_structure(self.project_description)
+            gitignore_content = self.strategy.generate_gitignore_content(
+                self.project_description.get("technologies", [])
+            )
+        else:
+            # Fallback to old behavior if no strategy is found
+            package_structure = {
+                "project_name": self.project_description.get("project_name", "my-project"),
+                "description": self.project_description.get("description", ""),
+                "project_type": self.project_plan.get("project_type", ""),
+                "technologies": self.project_plan.get("technologies", []),
+                "directories": [], "files": []
+            }
+            gitignore_content = self._generate_gitignore_fallback(package_structure)
+
         package_results = package_handler.ensure_package_files(package_structure)
         
-        # STEP 2: Create .gitignore BEFORE any other files
-        console.print("\n[bold yellow]Step 2: Creating .gitignore before any other files...[/bold yellow]")
-        gitignore_content = self._generate_gitignore(package_structure)
         gitignore_path = self.project_dir / ".gitignore"
         if not gitignore_path.exists():
             with open(gitignore_path, "w", encoding='utf-8') as f:
                 f.write(gitignore_content)
-            package_results["created_files"].append(str(gitignore_path))
+            package_results.setdefault("created_files", []).append(str(gitignore_path))
             console.print(f"  - Created .gitignore")
         
         if package_results.get("created_files"):
-            console.print("\n[bold green]Created package files:[/bold green]")
+            console.print("\n[bold green]Created package and gitignore files:[/bold green]")
             self.logger.start_subsection("Created Package Files")
             for file_path in package_results["created_files"]:
                 console.print(f"  - {Path(file_path).name}")
                 self.logger.log_text(f"- {Path(file_path).name}")
-        
-        # STEP 3: Initialize Git repository
-        console.print("\n[bold yellow]Step 3: Initializing Git repository...[/bold yellow]")
+        return package_results
+
+    def _setup_git_repository(self) -> None:
+        """Initializes the Git repository."""
+        console.print("\n[bold yellow]Step 2: Initializing Git repository...[/bold yellow]")
         self.git_manager = GitManager(self.project_dir)
         git_init_result = self.git_manager.init_repo()
-
         if git_init_result["success"]:
             console.print(f"[bold green]{git_init_result['message']}[/bold green]")
             self.logger.log_text(f"✅ {git_init_result['message']}")
@@ -334,124 +350,69 @@ class CodeAgent:
             console.print(f"[bold yellow]Note:[/bold yellow] {git_init_result['message']}")
             self.logger.log_text(f"⚠️ {git_init_result['message']}")
 
-        # STEP 4: Create all project files and directory structure
-        console.print("\n[bold yellow]Step 4: Creating all project files and directory structure...[/bold yellow]")
-        
-        # Check for and remove any duplicate/nested project structures
+    def _setup_directory_structure(self) -> Dict:
+        """Creates the directory structure for the project."""
+        console.print("\n[bold yellow]Step 3: Creating directory structure...[/bold yellow]")
         self._clean_duplicate_structures()
 
-        # Generate a prompt to extract ONLY the directory structure
         structure_prompt = f"""
         Based on the following project plan, generate ONLY a directory structure without any file content.
         Do not generate any code files - only create the folder structure.
-
         {self.project_plan.get('raw_plan', '')}
-
-        Provide your response in the following JSON format:
-        {{
-            "directories": [
-                "path/to/directory1",
-                "path/to/directory2",
-                ...
-            ],
-            "files": []
-        }}
-
-        Include only the JSON output without any additional text.
-        IMPORTANT: Leave the "files" array empty - all file generation will be handled by the planned tasks.
+        Provide your response in JSON format: {{"directories": ["path/to/dir1", ...], "files": []}}
+        IMPORTANT: Leave the "files" array empty.
         """
-
         structure_text = self.ai_client.generate_text(structure_prompt)
 
-        # Extract JSON from the response
-        try:
-            # Find JSON in the response
-            json_start = structure_text.find('{')
-            json_end = structure_text.rfind('}') + 1
+        json_start = structure_text.find('{')
+        json_end = structure_text.rfind('}') + 1
+        if json_start == -1 or json_end == -1:
+            raise ValueError("No JSON found in the directory structure response")
 
-            if json_start >= 0 and json_end > json_start:
-                json_str = structure_text[json_start:json_end]
-                structure = json.loads(json_str)
-            else:
-                raise ValueError("No JSON found in the response")
+        structure = json.loads(structure_text[json_start:json_end])
+        self.executor = Executor(self.ai_client, self.project_dir)
+        initialize_code_optimizer()
+        initialize_unified_mcp_integration(self.project_dir)
+        setup_result = self.executor.setup_project_structure(structure)
 
-            # Update executor to use project directory
-            self.executor = Executor(self.ai_client, self.project_dir)
-            
-            # Initialize code optimizer
-            initialize_code_optimizer()
-            
-            # Initialize unified MCP integration
-            initialize_unified_mcp_integration(self.project_dir)
+        if setup_result.get("created_directories"):
+            console.print("\n[bold green]Created directories:[/bold green]")
+            self.logger.start_subsection("Created Directories")
+            for directory in setup_result["created_directories"]:
+                console.print(f"  - {directory}")
+                self.logger.log_text(f"- {directory}")
 
-            # Set up ONLY the directory structure (no file generation)
-            setup_result = self.executor.setup_project_structure(structure)
+        if setup_result.get("errors"):
+            console.print("\n[bold red]Errors creating directories:[/bold red]")
+            self.logger.start_subsection("Errors")
+            for error in setup_result["errors"]:
+                console.print(f"  - {error}")
+                self.logger.log_text(f"- ❌ {error}")
 
-            # Display results
-            if setup_result["created_directories"]:
-                console.print("\n[bold green]Created directories:[/bold green]")
-                self.logger.start_subsection("Created Directories")
-                for directory in setup_result["created_directories"]:
-                    console.print(f"  - {directory}")
-                    self.logger.log_text(f"- {directory}")
+        return setup_result
 
-            # Only create essential package files (package.json, requirements.txt, etc.)
-            # but not application code files
-            package_handler = PackageHandler(self.project_dir)
-            package_results = package_handler.ensure_package_files({"directories": structure.get("directories", []), "files": []})
-            
-            if package_results.get("created_files"):
-                console.print("\n[bold green]Created essential files:[/bold green]")
-                self.logger.start_subsection("Created Essential Files")
-                for file_path in package_results["created_files"]:
-                    console.print(f"  - {file_path}")
-                    self.logger.log_text(f"- {file_path}")
+    def _commit_initial_structure(self) -> None:
+        """Commits the initial project structure to Git."""
+        console.print("\n[bold yellow]Committing initial project structure...[/bold yellow]")
+        commit_result = self.git_manager.commit("Initial project structure")
+        if commit_result["success"]:
+            console.print(f"[bold green]{commit_result['message']}[/bold green]")
+            self.logger.log_text(f"✅ {commit_result['message']}")
+        else:
+            console.print(f"[bold red]Error committing changes:[/bold red] {commit_result.get('error', 'Unknown error')}")
+            self.logger.log_text(f"❌ Error committing changes: {commit_result.get('error', 'Unknown error')}")
 
-            if setup_result["errors"] or package_results.get("errors"):
-                console.print("\n[bold red]Errors:[/bold red]")
-                self.logger.start_subsection("Errors")
-                for error in setup_result["errors"] + package_results.get("errors", []):
-                    console.print(f"  - {error}")
-                    self.logger.log_text(f"- ❌ {error}")
+        state_file = self.project_dir / "project_state.json"
+        self._save_project_state(state_file)
 
-            # Commit the initial structure
-            console.print("\n[bold yellow]Committing initial project structure...[/bold yellow]")
-            commit_result = self.git_manager.commit("Initial project structure")
-
-            if commit_result["success"]:
-                console.print(f"[bold green]{commit_result['message']}[/bold green]")
-                self.logger.log_text(f"✅ {commit_result['message']}")
-            else:
-                console.print(f"[bold red]Error committing changes:[/bold red] {commit_result.get('error', 'Unknown error')}")
-                self.logger.log_text(f"❌ Error committing changes: {commit_result.get('error', 'Unknown error')}")
-
-            # Save project state to the project directory
-            state_file = self.project_dir / "project_state.json"
-            self._save_project_state(state_file)
-
-            # STEP 5: Install dependencies as the FINAL step
-            console.print("\n[bold yellow]Step 5: Installing dependencies (final step)...[/bold yellow]")
-            all_package_files = [f for f in package_results.get("created_files", []) if Path(f).name in ["package.json", "requirements.txt", "Gemfile", "Cargo.toml"]]
-            if all_package_files:
-                self._install_dependencies(all_package_files)
-            else:
-                console.print("  - No package files found to install")
-
-            # Save the logger
-            self.logger.save()
-
-            console.print("\n[bold green]✅ Project structure ready! All code generation will be handled by the planned tasks.[/bold green]")
-
-            return {
-                "success": True,
-                "directories_created": len(setup_result["created_directories"]),
-                "files_created": len(package_results.get("created_files", [])),
-                "errors": setup_result["errors"] + package_results.get("errors", [])
-            }
-        except Exception as e:
-            logger.error(f"Error setting up project structure: {e}")
-            console.print(f"[bold red]Error setting up project structure:[/bold red] {str(e)}")
-            return {"success": False, "error": str(e)}
+    def _install_project_dependencies(self, created_files: List[str]) -> None:
+        """Installs project dependencies as the final step."""
+        console.print("\n[bold yellow]Step 4: Installing dependencies (final step)...[/bold yellow]")
+        package_files = [f for f in created_files if Path(f).name in ["package.json", "requirements.txt", "Gemfile", "Cargo.toml"]]
+        if package_files:
+            self._install_dependencies(package_files)
+        else:
+            console.print("  - No package files found to install")
 
     def _clean_duplicate_structures(self) -> None:
         """
@@ -527,88 +488,6 @@ class CodeAgent:
         else:
             console.print("    [green]✓ Cleaned up duplicate structures[/green]")
 
-    def _generate_gitignore(self, package_structure: Dict) -> str:
-        """
-        Generate .gitignore content based on project technologies.
-        """
-        technologies = package_structure.get("technologies", [])
-        project_type = package_structure.get("project_type", "")
-        
-        gitignore_content = ["# General"]
-        gitignore_content.extend([
-            ".DS_Store",
-            "Thumbs.db",
-            "*.log",
-            "*.tmp",
-            "*.temp",
-            ".env",
-            ".env.local",
-            ".env.*.local",
-            ""
-        ])
-        
-        # Add Node.js/JavaScript specific ignores
-        if any(tech.lower() in ["javascript", "typescript", "react", "vue", "angular", "node", "npm", "yarn"] for tech in technologies) or "javascript" in project_type.lower():
-            gitignore_content.extend([
-                "# Node.js",
-                "node_modules/",
-                "npm-debug.log*",
-                "yarn-debug.log*",
-                "yarn-error.log*",
-                ".npm",
-                ".yarn-integrity",
-                "dist/",
-                "build/",
-                ".next/",
-                ".nuxt/",
-                ".vuepress/dist",
-                ""
-            ])
-        
-        # Add Python specific ignores
-        if any(tech.lower() in ["python", "django", "flask", "fastapi"] for tech in technologies) or "python" in project_type.lower():
-            gitignore_content.extend([
-                "# Python",
-                "__pycache__/",
-                "*.py[cod]",
-                "*$py.class",
-                "*.so",
-                ".Python",
-                "build/",
-                "develop-eggs/",
-                "dist/",
-                "downloads/",
-                "eggs/",
-                ".eggs/",
-                "lib/",
-                "lib64/",
-                "parts/",
-                "sdist/",
-                "var/",
-                "wheels/",
-                "*.egg-info/",
-                ".installed.cfg",
-                "*.egg",
-                "venv/",
-                "env/",
-                ".venv/",
-                ".env/",
-                ""
-            ])
-        
-        # Add IDE specific ignores
-        gitignore_content.extend([
-            "# IDEs",
-            ".vscode/",
-            ".idea/",
-            "*.swp",
-            "*.swo",
-            "*~",
-            ""
-        ])
-        
-        return "\n".join(gitignore_content)
-    
     def _install_dependencies(self, created_files: list) -> None:
         """
         Install dependencies based on created package files.
@@ -726,107 +605,6 @@ class CodeAgent:
             except Exception as e:
                 console.print(f"  [yellow]Warning: Could not optimize {file_path_str}: {str(e)}[/yellow]")
                 logger.warning(f"Code optimization failed for {file_path_str}: {e}")
- 
-    def _check_shadcn_integration(self) -> None:
-         """
-         Check shadcn-ui integration status and provide recommendations.
-         """
-         try:
-             console.print("\n[bold cyan]Checking shadcn-ui integration...[/bold cyan]")
-             
-             # Perform health check
-             shadcn_integration = get_shadcn_integration(self.project_dir)
-             health_result = shadcn_integration.perform_health_check()
-             
-             # Log results
-             if health_result.is_healthy:
-                 self.logger.log_text("✅ shadcn-ui integration is healthy")
-             else:
-                 self.logger.log_text("⚠️ shadcn-ui integration issues detected:")
-                 for issue in health_result.issues[:3]:  # Show top 3 issues
-                     self.logger.log_text(f"  - {issue}")
-                 
-                 if health_result.recommendations:
-                     self.logger.log_text("Recommendations:")
-                     for rec in health_result.recommendations[:3]:  # Show top 3 recommendations
-                         self.logger.log_text(f"  - {rec}")
-             
-             # Suggest components for common web features
-             if health_result.project_type:
-                 common_features = ["form", "navigation", "data display", "user feedback"]
-                 for feature in common_features:
-                     suggestions = shadcn_integration.suggest_components_for_feature(feature)
-                     if suggestions:
-                         console.print(f"  [dim]For {feature}: {', '.join(suggestions[:3])}[/dim]")
-                         
-         except Exception as e:
-             console.print(f"  [yellow]Warning: Could not check shadcn-ui integration: {str(e)}[/yellow]")
-             logger.warning(f"shadcn-ui integration check failed: {e}")
-
-    def _enhance_project_with_mcp(self) -> None:
-         """Enhance the project using unified MCP integration for Context7 and ShadCN"""
-         try:
-             console.print("\n[bold blue]🚀 Enhancing project with MCP integration...[/bold blue]")
-             self.logger.start_subsection("MCP Integration Enhancement")
-             
-             # Get unified MCP integration
-             unified_integration = get_unified_mcp_integration()
-             if not unified_integration:
-                 console.print("  [yellow]Warning: Unified MCP integration not available[/yellow]")
-                 return
-             
-             # Analyze project structure
-             analysis = unified_integration.analyze_project_structure()
-             project_type = analysis.get('project_type', 'unknown')
-             
-             console.print(f"  [dim]Detected project type: {project_type}[/dim]")
-             self.logger.log_text(f"Detected project type: {project_type}")
-             
-             # Get intelligent suggestions based on project analysis
-             if project_type in ['react', 'nextjs', 'vue', 'angular']:
-                 # Get Context7 suggestions for libraries and best practices
-                 context7_integration = get_context7_integration()
-                 if context7_integration:
-                     # Suggest relevant libraries based on project type
-                     library_suggestions = context7_integration.suggest_libraries_for_project(project_type)
-                     if library_suggestions:
-                         console.print("  [dim]📚 Recommended libraries:[/dim]")
-                         self.logger.log_text("Recommended libraries:")
-                         for lib in library_suggestions[:3]:  # Show top 3
-                             console.print(f"    - {lib.name}: {lib.description[:60]}...")
-                             self.logger.log_text(f"  - {lib.name}: {lib.description}")
-                 
-                 # Get ShadCN component suggestions
-                 shadcn_integration = get_shadcn_integration()
-                 if shadcn_integration:
-                     # Suggest components based on common web app patterns
-                     common_patterns = ['navigation', 'forms', 'data-display', 'feedback']
-                     console.print("  [dim]🎨 Suggested UI components:[/dim]")
-                     self.logger.log_text("Suggested UI components:")
-                     
-                     for pattern in common_patterns:
-                         suggestions = shadcn_integration.suggest_components_for_feature(pattern)
-                         if suggestions:
-                             component_list = ', '.join(suggestions[:2])  # Show top 2 per pattern
-                             console.print(f"    - For {pattern}: {component_list}")
-                             self.logger.log_text(f"  - For {pattern}: {component_list}")
-             
-             # Generate integration recommendations
-             recommendations = unified_integration.get_integration_recommendations()
-             if recommendations:
-                 console.print("  [dim]💡 Integration recommendations:[/dim]")
-                 self.logger.log_text("Integration recommendations:")
-                 for rec in recommendations[:3]:  # Show top 3
-                     console.print(f"    - {rec}")
-                     self.logger.log_text(f"  - {rec}")
-             
-             # Log completion
-             console.print("  [green]✅ MCP integration enhancement completed[/green]")
-             self.logger.log_text("✅ MCP integration enhancement completed")
-             
-         except Exception as e:
-             console.print(f"  [yellow]Warning: Could not enhance project with MCP integration: {str(e)}[/yellow]")
-             logger.warning(f"MCP integration enhancement failed: {e}")
 
     def execute_task(self, task_index: int) -> Dict:
         """
@@ -838,267 +616,159 @@ class CodeAgent:
         Returns:
             Dictionary with execution results
         """
-        if not self.tasks:
-            return {"success": False, "error": "No tasks available"}
+        if not self.tasks or not (0 <= task_index < len(self.tasks)):
+            return {"success": False, "error": "Invalid task index"}
 
-        if task_index < 0 or task_index >= len(self.tasks):
-            return {"success": False, "error": f"Invalid task index: {task_index}"}
+        self.current_task = self.tasks[task_index]
+        task_name = self.current_task.get('task name', f'Task {task_index+1}')
+        task_description = self.current_task.get('description', 'No description')
 
-        task = self.tasks[task_index]
-        self.current_task = task
+        self._log_task_start(task_index, task_name, task_description)
 
-        # Get task name and description
-        task_name = task.get('task name', task.get('name', f'Task {task_index+1}'))
-        task_description = task.get('description', 'No description')
-
-        # Start task execution in the logger
-        self.logger.start_section(f"Task {task_index+1}: {task_name}")
-        self.logger.log_text(f"Description: {task_description}")
-
-        # Log task execution in the markdown log
-        self.log_capture.log_section(f"Task {task_index+1}: {task_name}",
-                                   f"Description: {task_description}")
-
-        console.print(Panel(f"[bold blue]Executing Task: {task_name}[/bold blue]"))
-        console.print(f"Description: {task_description}")
-
-        # Make sure we're in the project directory
         if not self.project_dir or not self.project_dir.exists():
             console.print("[bold red]Error: Project directory not found[/bold red]")
             return {"success": False, "error": "Project directory not found"}
 
-        # Make sure git is initialized
+        self._ensure_git_initialized()
+        branch_name = self._setup_task_branch(task_name)
+
+        try:
+            execution_plan = self._generate_execution_plan(self.current_task)
+            self._execute_commands(execution_plan.get("commands", []))
+            self._implement_code_changes(execution_plan.get("code_changes", []))
+            self._commit_task_changes(task_name)
+            self._ensure_readme_exists()
+
+            return {
+                "success": True, "task_index": task_index, "branch": branch_name,
+                "commands_executed": len(execution_plan.get("commands", [])),
+                "code_changes": len(execution_plan.get("code_changes", []))
+            }
+        except Exception as e:
+            logger.error(f"Error executing task {task_name}: {e}")
+            console.print(f"[bold red]Error executing task {task_name}:[/bold red] {str(e)}")
+            return {"success": False, "error": str(e)}
+
+    def _log_task_start(self, task_index, task_name, task_description):
+        """Logs the start of a task."""
+        self.logger.start_section(f"Task {task_index+1}: {task_name}")
+        self.logger.log_text(f"Description: {task_description}")
+        self.log_capture.log_section(f"Task {task_index+1}: {task_name}", f"Description: {task_description}")
+        console.print(Panel(f"[bold blue]Executing Task: {task_name}[/bold blue]"))
+        console.print(f"Description: {task_description}")
+
+    def _ensure_git_initialized(self):
+        """Initializes Git if it hasn't been already."""
         if not self.git_manager:
             console.print("[bold yellow]Initializing Git repository in project directory...[/bold yellow]")
             self.git_manager = GitManager(self.project_dir)
             git_init_result = self.git_manager.init_repo()
-
             if git_init_result["success"]:
                 console.print(f"[bold green]{git_init_result['message']}[/bold green]")
             else:
                 console.print(f"[bold yellow]Note:[/bold yellow] {git_init_result['message']}")
 
-        # Create a branch for the task
-        task_name = task.get('task name', task.get('name', f'task-{task_index+1}'))
+    def _setup_task_branch(self, task_name: str) -> str:
+        """Creates and checks out a new branch for the task."""
         branch_name = f"feature/{task_name.lower().replace(' ', '-')}"
-
         console.print(f"\n[bold yellow]Creating branch: {branch_name}[/bold yellow]")
         branch_result = self.git_manager.create_branch(branch_name)
-
         if branch_result["success"]:
             console.print(f"[bold green]{branch_result['message']}[/bold green]")
         else:
             console.print(f"[bold red]Error creating branch:[/bold red] {branch_result.get('error', 'Unknown error')}")
+        return branch_name
 
-        # Generate a prompt to execute the task
+    def _generate_execution_plan(self, task: Dict) -> Dict:
+        """Generates the execution plan (commands and code changes) for a task."""
         execution_prompt = f"""
         I need to implement the following task in a software project:
-
-        Task: {task.get('task name', task.get('name', f'Task {task_index+1}'))}
+        Task: {task.get('task name', 'Unnamed Task')}
         Description: {task.get('description', 'No description')}
-
-        Project context:
-        {self.project_plan.get('raw_plan', '')}
-
+        Project context: {self.project_plan.get('raw_plan', '')}
         Project name: {self.project_name}
-
         IMPORTANT GUIDELINES:
-        - DO NOT use external code generators like 'create-react-app', 'npx create-next-app', etc.
-        - Instead, write all necessary code files directly
-        - Generate all required configuration files (package.json, webpack.config.js, etc.) manually
-        - Only use commands for necessary package installations (npm install, pip install, etc.)
-        - Create a complete, working project structure with all required files
-
-        Generate a list of specific commands and code changes needed to implement this task.
-        Provide your response in the following JSON format:
+        - Generate all required configuration files and code manually.
+        - Do not use external code generators like 'create-react-app'.
+        - Provide your response as a single JSON object.
         {{
-            "commands": [
-                {{
-                    "command": "command to execute",
-                    "description": "what this command does"
-                }},
-                ...
-            ],
-            "code_changes": [
-                {{
-                    "file_path": "path/to/file",
-                    "description": "detailed description of what code to write in this file"
-                }},
-                ...
-            ]
+            "commands": [{{"command": "...", "description": "..."}}],
+            "code_changes": [{{"file_path": "...", "description": "..."}}]
         }}
-
-        Include only the JSON output without any additional text.
         """
-
         console.print("\n[bold yellow]Generating implementation plan...[/bold yellow]")
         execution_text = self.ai_client.generate_text(execution_prompt)
+        json_start = execution_text.find('{')
+        json_end = execution_text.rfind('}') + 1
+        if json_start == -1 or json_end == -1:
+            raise ValueError("No JSON found in the implementation plan response")
+        return json.loads(execution_text[json_start:json_end])
 
-        try:
-            # Find JSON in the response
-            json_start = execution_text.find('{')
-            json_end = execution_text.rfind('}') + 1
+    def _execute_commands(self, commands: List[Dict]):
+        """Executes a list of shell commands."""
+        if not commands:
+            return
+        console.print("\n[bold green]Executing commands:[/bold green]")
+        for cmd_info in commands:
+            command = cmd_info.get("command", "")
+            description = cmd_info.get("description", "No description")
+            console.print(f"\n[bold cyan]Command:[/bold cyan] {command}")
+            console.print(f"[italic]{description}[/italic]")
+            self.log_capture.log_command(command, description=description)
 
-            if json_start >= 0 and json_end > json_start:
-                json_str = execution_text[json_start:json_end]
-                execution_plan = json.loads(json_str)
+            is_package_install = any(cmd in command for cmd in ["npm install", "yarn add", "pip install"])
+            result = self.executor.execute_command(command, capture_output=not is_package_install)
+            console.print(Markdown(format_command_output(result)))
+
+    def _implement_code_changes(self, code_changes: List[Dict]):
+        """Implements a list of code changes by generating files."""
+        if not code_changes:
+            return
+        console.print("\n[bold green]Implementing code changes:[/bold green]")
+        for change in code_changes:
+            file_path = change.get("file_path", "")
+            description = change.get("description", "No description")
+            console.print(f"\n[bold cyan]📄 Creating file:[/bold cyan] {file_path}")
+            console.print(f"[italic]📝 {description}[/italic]")
+
+            language = Path(file_path).suffix[1:] if '.' in Path(file_path).name else None
+            result = self.executor.generate_file(file_path, description, language)
+
+            if result["success"]:
+                console.print(f"[dim]📊 File created: {result.get('file_size', 0)} characters[/dim]")
+                self.log_capture.log_file_operation("create", result['file_path'], result['content_preview'])
             else:
-                raise ValueError("No JSON found in the response")
+                error_msg = result.get('error', 'Unknown error')
+                console.print(f"[bold red]❌ Error generating file:[/bold red] {error_msg}")
+                self.log_capture.log_error(error_msg, context=f"File generation: {file_path}")
 
-            # Execute commands
-            if "commands" in execution_plan and execution_plan["commands"]:
-                console.print("\n[bold green]Executing commands:[/bold green]")
+    def _commit_task_changes(self, task_name: str):
+        """Commits the changes for the current task."""
+        console.print("\n[bold yellow]Committing changes...[/bold yellow]")
+        commit_message = f"Implement task: {task_name}"
+        commit_result = self.git_manager.commit(commit_message)
+        if commit_result["success"]:
+            console.print(f"[bold green]{commit_result['message']}[/bold green]")
+        else:
+            console.print(f"[bold red]Error committing changes:[/bold red] {commit_result.get('error', 'Unknown error')}")
 
-                for cmd_info in execution_plan["commands"]:
-                    command = cmd_info.get("command", "")
-                    description = cmd_info.get("description", "No description")
+        state_file = self.project_dir / "project_state.json"
+        self._save_project_state(state_file)
 
-                    console.print(f"\n[bold cyan]Command:[/bold cyan] {command}")
-                    console.print(f"[italic]{description}[/italic]")
-
-                    # Log the command in the markdown log
-                    self.log_capture.log_command(command, description=description)
-
-                    # Execute the command
-                    # Check if this is a code generator command that should be avoided
-                    is_code_generator = any(cmd in command for cmd in [
-                        "create-react-app",
-                        "npx create-",
-                        "yarn create",
-                        "django-admin startproject",
-                        "rails new",
-                        "vue create",
-                        "ng new"
-                    ])
-
-                    # For package installation commands, don't capture output to show real-time progress
-                    is_package_install = any(cmd in command for cmd in [
-                        "npm install",
-                        "yarn add",
-                        "pip install",
-                        "mvn install",
-                        "gradle build",
-                        "cargo build"
-                    ])
-
-                    if is_code_generator:
-                        console.print("[bold red]Warning: Code generator commands should be avoided.[/bold red]")
-                        console.print("[yellow]The agent should generate all code files directly instead of using external generators.[/yellow]")
-                        console.print("[yellow]Proceeding with the command, but consider modifying your approach.[/yellow]\n")
-                        result = self.executor.execute_command(command, capture_output=False)
-                    elif is_package_install:
-                        console.print("[yellow]This is a package installation command that may take several minutes.[/yellow]")
-                        console.print("[yellow]Output will be displayed in real-time. Please be patient...[/yellow]\n")
-                        result = self.executor.execute_command(command, capture_output=False)
-                    else:
-                        result = self.executor.execute_command(command)
-
-                    # Display the result
-                    console.print(Markdown(format_command_output(result)))
-
-            # Implement code changes
-            if "code_changes" in execution_plan and execution_plan["code_changes"]:
-                console.print("\n[bold green]Implementing code changes:[/bold green]")
-
-                for change in execution_plan["code_changes"]:
-                    file_path = change.get("file_path", "")
-                    description = change.get("description", "No description")
-
-                    console.print(f"\n[bold cyan]📄 Creating file:[/bold cyan] {file_path}")
-                    console.print(f"[italic]📝 {description}[/italic]")
-
-                    # Determine the language from the file extension
-                    language = None
-                    if "." in file_path:
-                        extension = file_path.split(".")[-1]
-                        language_map = {
-                            "py": "python",
-                            "js": "javascript",
-                            "ts": "typescript",
-                            "html": "html",
-                            "css": "css",
-                            "java": "java",
-                            "c": "c",
-                            "cpp": "c++",
-                            "go": "go",
-                            "rs": "rust",
-                            "rb": "ruby",
-                            "php": "php",
-                            "sh": "bash",
-                            "md": "markdown"
-                        }
-                        language = language_map.get(extension.lower())
-
-                    # Generate the file (now with streaming progress)
-                    result = self.executor.generate_file(file_path, description, language)
-
-                    if result["success"]:
-                        # Show a brief summary since detailed progress was already shown
-                        file_size = result.get('file_size', 0)
-                        console.print(f"[dim]📊 File created: {file_size} characters[/dim]")
-
-                        # Log the file generation in the markdown log
-                        self.log_capture.log_file_operation("create", result['file_path'], result['content_preview'])
-                    else:
-                        console.print(f"[bold red]❌ Error generating file:[/bold red] {result.get('error', 'Unknown error')}")
-
-                        # Log the file generation error in the markdown log
-                        self.log_capture.log_error(result.get('error', 'Unknown error'),
-                                                 context=f"File generation: {file_path}")
-
-            # Commit the changes
-            console.print("\n[bold yellow]Committing changes...[/bold yellow]")
-            commit_message = f"Implement {task.get('task name', task.get('name', f'Task {task_index+1}'))}"
-            commit_result = self.git_manager.commit(commit_message)
-
-            if commit_result["success"]:
-                console.print(f"[bold green]{commit_result['message']}[/bold green]")
-            else:
-                console.print(f"[bold red]Error committing changes:[/bold red] {commit_result.get('error', 'Unknown error')}")
-
-            # Save project state to the project directory
-            state_file = self.project_dir / "project_state.json"
-            self._save_project_state(state_file)
-
-            # Add a README if it doesn't exist
-            readme_path = self.project_dir / "README.md"
-            if not readme_path.exists():
-                console.print("\n[bold yellow]Creating README.md...[/bold yellow]")
-                readme_content = f"""# {self.project_name.replace('-', ' ').title()}
-
-This project was generated by AI Code Agent.
-
-## Project Description
-
-{self.project_description.get('raw_description', 'No description available.')}
-
-## Project Structure
-
-Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
-
-                try:
-                    with open(readme_path, 'w') as f:
-                        f.write(readme_content)
-                    console.print(f"[bold green]Created README.md[/bold green]")
-
-                    # Commit the README
-                    self.git_manager.add_files([readme_path])
-                    self.git_manager.commit("Add README.md")
-                except Exception as e:
-                    console.print(f"[bold red]Error creating README:[/bold red] {str(e)}")
-
-            return {
-                "success": True,
-                "task_index": task_index,
-                "branch": branch_name,
-                "commands_executed": len(execution_plan.get("commands", [])),
-                "code_changes": len(execution_plan.get("code_changes", []))
-            }
-        except Exception as e:
-            logger.error(f"Error executing task: {e}")
-            console.print(f"[bold red]Error executing task:[/bold red] {str(e)}")
-            return {"success": False, "error": str(e)}
+    def _ensure_readme_exists(self):
+        """Creates a README.md file if one doesn't exist."""
+        readme_path = self.project_dir / "README.md"
+        if not readme_path.exists():
+            console.print("\n[bold yellow]Creating README.md...[/bold yellow]")
+            readme_content = f"# {self.project_name.replace('-', ' ').title()}\n\nThis project was generated by AI Code Agent."
+            try:
+                with open(readme_path, 'w') as f:
+                    f.write(readme_content)
+                console.print(f"[bold green]Created README.md[/bold green]")
+                self.git_manager.add_files([str(readme_path)])
+                self.git_manager.commit("Add README.md")
+            except Exception as e:
+                console.print(f"[bold red]Error creating README:[/bold red] {str(e)}")
 
     def review_code(self, auto_fix: bool = False) -> Dict:
         """
@@ -1414,11 +1084,18 @@ def create_new_project_step_by_step(path: Path, prompt: str, options: Dict) -> b
         console.print(f"[bold red]Error setting up project:[/bold red] {setup_result.get('error', 'Unknown error')}")
         return False
 
-    # Step 3: Execute tasks
+    # Step 3: Enhance with MCP
+    console.print("\n[bold yellow]Step 3: Enhancing project with MCPs...[/bold yellow]")
+    if not auto_confirm("Continue with MCP enhancement?"):
+        console.print("[bold yellow]Skipping MCP enhancement.[/bold yellow]")
+    elif agent.strategy:
+        agent.strategy.enhance_with_mcp()
+
+    # Step 4: Execute tasks
     for i in range(len(agent.tasks)):
         task = agent.tasks[i]
         task_name = task.get('task name', task.get('name', f'Task {i+1}'))
-        console.print(f"\n[bold yellow]Step 3.{i+1}: Executing task: {task_name}[/bold yellow]")
+        console.print(f"\n[bold yellow]Step 4.{i+1}: Executing task: {task_name}[/bold yellow]")
 
         if not auto_confirm(f"Continue with executing task: {task_name}?"):
             console.print("[bold yellow]Skipping this task.[/bold yellow]")
@@ -1431,8 +1108,8 @@ def create_new_project_step_by_step(path: Path, prompt: str, options: Dict) -> b
                 console.print("[bold yellow]Operation cancelled by user.[/bold yellow]")
                 return False
 
-    # Step 4: Review code
-    console.print("\n[bold yellow]Step 4: Reviewing code...[/bold yellow]")
+    # Step 5: Review code
+    console.print("\n[bold yellow]Step 5: Reviewing code...[/bold yellow]")
     if not auto_confirm("Continue with code review?"):
         console.print("[bold yellow]Skipping code review.[/bold yellow]")
     else:
@@ -1440,8 +1117,8 @@ def create_new_project_step_by_step(path: Path, prompt: str, options: Dict) -> b
         if not review_result["success"]:
             console.print(f"[bold red]Error reviewing code:[/bold red] {review_result.get('error', 'Unknown error')}")
 
-    # Step 5: Fix code issues
-    console.print("\n[bold yellow]Step 5: Fixing code issues...[/bold yellow]")
+    # Step 6: Fix code issues
+    console.print("\n[bold yellow]Step 6: Fixing code issues...[/bold yellow]")
     if not auto_confirm("Continue with fixing code issues?"):
         console.print("[bold yellow]Skipping code fixes.[/bold yellow]")
     else:
@@ -1449,17 +1126,17 @@ def create_new_project_step_by_step(path: Path, prompt: str, options: Dict) -> b
         if not fix_result["success"]:
             console.print(f"[bold red]Error fixing code:[/bold red] {fix_result.get('error', 'Unknown error')}")
 
-    # Step 6: Open in editor
+    # Step 7: Open in editor
     if not no_editor:
-        console.print("\n[bold yellow]Step 6: Opening in code editor...[/bold yellow]")
+        console.print("\n[bold yellow]Step 7: Opening in code editor...[/bold yellow]")
         if not auto_confirm("Open project in code editor?"):
             console.print("[bold yellow]Skipping opening in editor.[/bold yellow]")
         else:
             agent.open_in_editor()
 
-    # Step 7: Deploy locally
+    # Step 8: Deploy locally
     if not no_deploy:
-        console.print("\n[bold yellow]Step 7: Deploying locally...[/bold yellow]")
+        console.print("\n[bold yellow]Step 8: Deploying locally...[/bold yellow]")
         if not auto_confirm("Deploy project locally?"):
             console.print("[bold yellow]Skipping local deployment.[/bold yellow]")
         else:
